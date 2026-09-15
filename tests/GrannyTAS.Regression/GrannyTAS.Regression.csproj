@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../GrannyTAS/src/InputFrame.cs" Link="InputFrame.cs" />
+    <Compile Include="../../GrannyTAS/src/PhysicsFrameState.cs" Link="PhysicsFrameState.cs" />
+    <Compile Include="../../GrannyTAS/src/VirtualInput.cs" Link="VirtualInput.cs" />
+    <Compile Include="../../GrannyTAS/src/TimeController.cs" Link="TimeController.cs" />
+    <Compile Include="../../GrannyTAS/src/Keybinds.cs" Link="Keybinds.cs" />
+    <Compile Include="../../GrannyTAS/src/TasConfig.cs" Link="TasConfig.cs" />
+    <Compile Include="../../GrannyTAS/src/MacroFile.cs" Link="MacroFile.cs" />
+    <Compile Include="../../GrannyTAS/src/MacroEngine.cs" Link="MacroEngine.cs" />
+    <Compile Include="../../GrannyTAS/src/SavedMacroInfo.cs" Link="SavedMacroInfo.cs" />
+    <Compile Include="../../GrannyTAS/src/MacroGameSetup.cs" Link="MacroGameSetup.cs" />
+    <Compile Include="../../GrannyTAS/src/WorldSnapshot.cs" Link="WorldSnapshot.cs" />
+    <Compile Include="../../GrannyTAS/src/GameplayFreeze.cs" Link="GameplayFreeze.cs" />
+    <Compile Include="../../GrannyTAS/src/PlayerGate.cs" Link="PlayerGate.cs" />
+  </ItemGroup>
+</Project>

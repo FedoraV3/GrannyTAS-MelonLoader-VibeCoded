@@ -1,0 +1,314 @@
+[[IDA:TimeScale_Writers_Exhaustive]]
+Exhaustive xref-verified list of every Assembly-CSharp caller of UnityEngine.Time::set_timeScale (thunk @ 0x18072b3c0),
+plus set_fixedDeltaTime / set_captureDeltaTime / set_maximumDeltaTime / Application::set_targetFrameRate /
+QualitySettings::set_vSyncCount. Verified via xrefs_to() on the IL2CPP thunks + decompile() + insn_query() disasm
+of each call site (constant operands resolved by reading the referenced float literal bytes directly, not
+by decompiler ftol guessing).
+
+=== Time::set_timeScale (0x18072b3c0) xrefs from Assembly-CSharp (12 total; 2 are data, not call sites) ===
+
+1. Days::Update  (fn 0x1801b17d0)  call site 0x1801b1bae
+   Time.timeScale = 15.0f (float literal, verified via bytes)
+   Condition: PlayerBedAnim.transform.parent.gameObject.activeSelf && !Paused.IsPaused && Input.GetKeyDown(KeyCode 98 = 'b')
+   Runs inside Update() (every frame) but the write itself only fires on the 'b' keydown edge -- a hidden/debug
+   fast-forward hotkey for the day-1 bed intro, NOT an unconditional per-frame reassert.
+
+2. Days.<StartDays>d__140::MoveNext  (fn 0x1801b4390, the day-transition coroutine)  call site 0x1801b873b
+   Time.timeScale = 1.0f (float literal, verified via bytes at 0x18098ca10)
+   Sits between EnemyController.SpawnGrandpa() and EnemyController.SlendrinaSpawn() calls -- one-shot restore
+   inside a coroutine step, not per-frame.
+
+3. Paused::GoToMainMenu  (fn 0x180231b80)  call site 0x180231bc2
+   Time.timeScale = 1.0f constant. Event-driven (main-menu button), followed by Cursor unlock + SceneManager.LoadScene.
+
+4. Paused::PauseGame  (fn 0x180231c20)  call site 0x180231c7e
+   Time.timeScale = 0.0f constant. Event-driven (pause button / API), sets Paused.IsPaused = true right after.
+
+5. Paused::RestartP  (fn 0x180231cc0)  call site 0x180231d02
+   Time.timeScale = 1.0f constant. Event-driven (restart button), followed by SceneManager.LoadScene.
+
+6. Paused::ResumeGame  (fn 0x180231d50)  call site 0x180231d9b
+   Time.timeScale = 1.0f constant. Event-driven (resume button), sets Paused.IsPaused = false right after.
+
+7 & 8. Paused::Update  (fn 0x180231fe0) -- TWO call sites, both inside the same Input.GetKeyDown(KeyCode.Escape=27) branch:
+   - 0x1802322a8: Time.timeScale = 1.0f  -- taken when Esc is pressed AND Paused.IsPaused was already true
+     (and none of KeyBindMenu/EscMenu/ResMenu is active) -> this is the "resume via Esc" path.
+   - 0x18023236a: Time.timeScale = 0.0f  -- taken when Esc is pressed AND Paused.IsPaused was false
+     -> this is the "pause via Esc" path.
+   Both run inside Update() (every frame) but are gated by the Esc GetKeyDown edge, not unconditional.
+   IMPORTANT: nowhere in Paused::Update (or anywhere else found) does the game read a saved PlayerPrefs value
+   and reassert Time.timeScale unconditionally every frame. No "options manager re-applies timeScale from
+   settings each frame" pattern exists in this assembly.
+
+9 & 10. GameJolt.Demo.UI.UITest::Pause / ::Resume  (fn 0x18028ff00 / 0x18028ffc0)
+   Time.timeScale = 0.0f / 1.0f constants respectively. This is GameJolt SDK demo/example code (Pause()/Resume()
+   one-liners), not part of the actual gameplay loop -- flagged separately as requested, almost certainly dead/unused
+   demo code bundled with the GameJolt API package.
+
+Two more xrefs to 0x18072b3c0 are DATA references (0x180cc5c20, 0x180fea8e4 -- vtable/metadata slots), not call sites.
+
+CONCLUSION for timeScale: every single write in Assembly-CSharp is event-driven (button click, Esc key edge,
+debug hotkey edge, or one-shot coroutine step). None of them re-assert every frame unconditionally. So if a TAS
+mod sets Time.timeScale = 0 and the world keeps moving, it is NOT because game code is clobbering timeScale --
+the more likely explanations are (a) MobileFPS' own Update-driven movement not actually being gated by
+Time.timeScale at all (CharacterController.Move uses Time.deltaTime, and deltaTime is itself scaled by
+timeScale in Unity's normal Update, BUT Time.deltaTime is only scaled by timeScale for the FIXED-time-step path;
+Update()'s Time.deltaTime *is* scaled by timeScale in stock Unity, so that should still work), or (b) the mod is
+looking at the wrong Time.timeScale (e.g. a stale IL2CPP domain), or (c) something is calling Time.timeScale = 1
+right after the mod sets it to 0 THIS SAME FRAME via one of the Escape/pause paths above if PlayerGate's read of
+Paused.IsPaused disagrees with the game's own Paused.IsPaused at that instant. Worth checking: does the mod pause
+via Time.timeScale directly, and is Paused.IsPaused ever true/false in a way that makes Paused::Update's Esc
+branch fire unexpectedly (e.g. injected Escape presses)?
+
+=== Time::set_fixedDeltaTime -- NO WRITES FOUND ===
+func_query for *set_fixedDeltaTime* and *fixedDelta* returned zero functions. Only a GETTER exists:
+UnityEngine.Time$$get_fixedDeltaTime @ 0x18072b240 (called from various places, read-only). The game never
+writes Time.fixedDeltaTime anywhere in Assembly-CSharp. Safe for the mod to own this knob outright.
+
+=== Time::set_captureDeltaTime -- NO SETTER FUNCTION EXISTS AT ALL ===
+func_query for *set_captureDeltaTime* / *captureDelta* returned nothing -- not even a thunk exists in the
+binary's import/IL2CPP-generated method table, meaning the game's managed code has literally never referenced
+Time.captureDeltaTime (getter or setter). Confirms CLAUDE.md's assumption that captureDeltaTime is a mod-only knob.
+
+=== Time::set_maximumDeltaTime -- NO SETTER FUNCTION EXISTS AT ALL ===
+Same as above: func_query found zero matches for set_maximumDeltaTime or maximumDelta. Game never touches this.
+
+=== Application::set_targetFrameRate (0x1806fbe50) xrefs (5 total; 2 data) ===
+All THREE call sites are in TMPro.Examples namespace -- bundled TextMeshPro example/demo scripts, not gameplay:
+  - TMPro.Examples.TMP_FrameRateCounter::Awake      (fn 0x1801cb6c0, call site 0x1801cb77c)
+  - TMPro.Examples.TMP_UiFrameRateCounter::Awake    (fn 0x1801cf1c0, call site 0x1801cf27d)
+  - TMPro.Examples.CameraController::Awake          (fn 0x180257eb0, call site 0x180257f11)
+These are TMPro demo scene scripts (frame-rate counter/camera demo), almost certainly not instantiated in the
+actual game scenes (level0/level1/level2). Not flagged as a gameplay concern, but noted since the task asked to
+report it. Did not verify whether any of these three demo components are actually placed in the shipped scenes --
+would need scene/prefab inspection (outside IDA) to be 100% sure they're inert.
+
+=== QualitySettings::set_vSyncCount (0x180710120) xrefs (6 total; 2 data) ===
+All FOUR call sites are inside MainMenu (the main-menu scene's controller class), none in gameplay-scene classes
+(Paused, Days, MobileFPS, etc. never call this):
+  - MainMenu::Start   call site 0x180222e04 -- vSyncCount = 1 or 0, from PlayerPrefs-toggle init, one-shot at Start.
+  - MainMenu::Update  call site 0x18022396b -- inside a "texture quality preset" click-handler branch (SetQualityLevel(0)
+    just before it); sets vSyncCount = PlayerPrefs.GetInt(VSync key) only when that branch is taken (UI click), not
+    unconditionally every frame.
+  - MainMenu::Update  call site 0x180227b1b -- same pattern, different quality-preset branch (SetQualityLevel(3)).
+  - MainMenu::Update  call site 0x1802282dc -- the actual VSync toggle's onClick handler; sets vSyncCount = 0/1
+    from the toggle's own state and immediately calls PlayerPrefs.Save().
+CONCLUSION for vSyncCount: only ever written from the MainMenu class (main-menu scene), in response to UI clicks,
+never unconditionally per-frame, and never from any gameplay-scene script. If the game scenes (level0/1/2) don't
+also host a live MainMenu component (not verified here -- would need scene inspection), vSyncCount set by the mod
+during gameplay should be completely safe from being clobbered.
+
+=== Paused class notes (per request #4) ===
+Paused.IsPaused (static bool, Paused_TypeInfo->static_fields->IsPaused) is written in exactly 5 places, all inside
+the methods above (GoToMainMenu, PauseGame->true, RestartP, ResumeGame->false, and both branches of Update's Esc
+handler). No separate "settings manager" was found that reasserts timeScale, fixedDeltaTime, captureDeltaTime, or
+vSyncCount from a saved PlayerPrefs value every frame -- MainMenu's PlayerPrefs-driven vSyncCount writes are the
+only PlayerPrefs-fed value among all six of these Time/Application/QualitySettings setters, and those are
+confined to the main-menu scene and gated by UI clicks, not a per-frame poll.
+
+All addresses double-checked via insn_query() disassembly at each call site (not just decompiler pseudocode) and
+float literal operands read directly from the referenced memory (e.g. 15.0f at 0x1801b1bae verified via the
+raw bytes of the movss source operand, not decompiler inference). No annotations were trusted without this
+independent verification.
+
+================================================================================
+
+[[IDA:PickRay_Update_0x180237ce0]]
+PickRay.Update (0x180237ce0, size 0xACF0, 9444 instructions, 1821 basic blocks) is a single giant
+MonoBehaviour.Update handling every interactable prop's per-frame logic (guns, crossbow, chargebulb,
+freeze trap, remote switches, and every generic ItemSeedData-tagged pickup) as one long straight-line
+chain of per-object blocks. Full pseudocode is 428946 chars (too large to dump wholesale); this is a
+structural map built via insn_query()/xrefs_to() windowed disassembly, cross-checked against IDA's
+recovered PickRay_Fields / FallingHolder_Fields / WindowJumping_Fields / PlayerStatus_Fields local
+types (object field offset = Fields offset + 0x10 for the klass+monitor header).
+
+--- Primary interact key edge ---
+0x180239543  mov ecx,[rbx+538h]         ; PickRay.MainInteract (KeyCode), Fields+0x528 -> obj+0x538
+0x18023954b  call Input.GetKeyDown
+0x180239552  jz loc_180239627           ; not pressed -> skip to DropKey block
+0x180239558-0x180239567  [rbx+28h]=PickRay.Ring GameObject .activeSelf must be true
+0x180239574-0x180239585  Paused.IsPaused must be false (Paused_TypeInfo+0xB8)
+0x18023958b-0x1802395bc  PickRay.Player(+0x38).GetComponent<FallingHolder>().isFalling(+0x81) must be false
+0x1802395be-0x1802395ef  same FallingHolder.isLanding(+0x82) must be false
+0x1802395f1-0x180239605  PickRay.WJ (WindowJumping_o*, +0x98) .IsJumping(+0x21) must be false
+0x180239607-0x18023961e  PickRay.PlayerStatus (+0x88) .IsJumpscared(+0xA8) must be false
+0x180239620  mov byte ptr [rbx+4D0h],1  ; buttonClicked = true  (PickRay_Fields.buttonClicked, Fields+0x4C0 -> obj+0x4D0)
+
+--- Secondary key (DropKey, NOT a second pickup key) ---
+0x180239627  mov ecx,[rbx+53Ch]         ; PickRay.DropKey (KeyCode), Fields+0x52C -> obj+0x53C
+0x18023962f  call Input.GetKeyDown
+same Ring/Paused/FallingHolder(isLanding only)/WJ.IsJumping/PlayerStatus.IsJumpscared gates, PLUS an extra
+  0x1802396cd  cmp byte ptr [rbx+48h],0  (a "looking at droppable" flag set by an earlier raycast's name check)
+0x1802396d3  mov byte ptr [rbx+4D1h],1  ; buttonClicked2 = true (Fields+0x4C1 -> obj+0x4D1)
+buttonClicked2 is consumed ONLY by PickRay.CheckItemDropping (0x180233070), which clears it after
+instantiating whatever the player currently holds (crossbow bolt / shotgun shell / freeze trap) -- this
+is the DROP action, not inventory pickup.
+
+--- Function-wide pause early-out ---
+0x1802396e8  cmp byte Paused.IsPaused,0
+0x1802396eb  jnz loc_18024294F   ; loc_18024294F is literally mid-epilogue (xmm register restores just
+                                  ; before `retn` at 0x1802429c3) -- i.e. when Paused.IsPaused is true,
+                                  ; the ENTIRE rest of PickRay.Update (all raycasts, all item dispatch,
+                                  ; all pickup logic) is skipped for that frame.
+
+--- The ONE shared raycast that feeds the whole item-name dispatch chain ---
+Only two calls to Physics.Raycast (overload _6450236928) exist in the entire function:
+  0x180239d64 -- first raycast, distance=PickRay+0x4F0, feeds the chargebulb/"b"-string special case
+                 and a hand-transform positioning routine (0x180239e34's Raycast_6450235632 too).
+  0x18023a094 -- SECOND raycast, distance=PickRay obj-offset 0x508 (struct field name recovered as
+                 "ParticleEffectElectricSpawn" by IDA's layout -- likely a decompiler mis-typed/reused
+                 slot, NOT confirmed as the intentional "pickup raycast distance" designer field;
+                 candidate RaycastCheckItemDis at Fields+0x34->obj+0x44 was NOT confirmed as the one
+                 actually feeding THIS call -- flagged uncertain).
+                 Origin: `this.transform.position` where `this`=the PickRay component's own GameObject.
+                 Direction: `this.transform.TransformDirection(Vector3.forward)`.
+                 UNVERIFIED: whether PickRay's own transform snaps instantly to the camera pivot each
+                 frame or is driven through a smoothing/lerp step -- not traced (would need PickRay's
+                 Awake/Start/LateUpdate or scene hierarchy/parenting, neither inspected in this pass).
+This raycast is gated by exactly the same FallingHolder/WJ/PlayerStatus checks as the button-set block
+above (see rejection-path section below), and every subsequent item-name comparison block in the huge
+dispatch chain REUSES this same RaycastHit struct (var_9F0) without re-raycasting and without
+re-checking these four flags.
+
+--- Rejection path (task-cited addresses) ---
+0x18023a094  call Physics.Raycast (distance=[rbx+508h])
+0x18023a0a4  jz  loc_18024250B          ; raycast missed -> reject
+0x18023a0aa..0x18023a0d4  GetComponent<FallingHolder>() on PickRay.Player (+0x38)
+0x18023a0da  cmp [rax+81h],0            ; FallingHolder.isFalling
+0x18023a0e1  jnz loc_18024250B          ; ** task addr #1 ** reject if isFalling
+0x18023a0e7..0x18023a111  GetComponent<FallingHolder>() again
+0x18023a117  cmp [rax+82h],0            ; FallingHolder.isLanding
+0x18023a11e  jnz loc_18024250B          ; ** task addr #2 ** reject if isLanding
+0x18023a124..0x18023a138  PickRay.WJ (+0x98) .IsJumping(+0x21) must be false, else jnz loc_18024250B
+0x18023a13e..0x18023a155  PickRay.PlayerStatus (+0x88) .IsJumpscared(+0xA8) must be false, else jnz loc_18024250B
+
+loc_18024250B (confirmed via xrefs_to -- exactly the 5 jumps above target it, no others):
+0x18024250b  call PickRay.TurnOffItemTexts
+0x180242515  mov [rbx+4D0h],0           ; buttonClicked = false, UNCONDITIONAL
+0x18024251c-0x180242590  SetActive(false) on ring/crosshair/UI images
+0x180242595  falls into unrelated per-frame housekeeping (watermelon-hint PlayerPrefs counter block,
+             other UI active-state checks -- NOT part of the pickup path)
+
+Program order confirms TurnOffItemTexts + buttonClicked=false (0x180242510-0x18024252e) executes
+STRICTLY AFTER the GetKeyDown block (0x18023954b) within the SAME Update() call -- the whole state
+machine (key edge -> gate -> raycast -> name match -> pickup) resolves in one frame, never spans two.
+
+--- Field offset provenance table (from *_Fields local types via type_inspect) ---
+[rbx+38h]  -> PickRay.Player (GameObject*)         Fields+0x28 -> obj+0x38
+[rax+81h]  -> FallingHolder.isFalling               Fields+0x71 -> obj+0x81
+[rax+82h]  -> FallingHolder.isLanding               Fields+0x72 -> obj+0x82
+[rbx+98h]  -> PickRay.WJ (WindowJumping_o*)         Fields+0x88 -> obj+0x98
+[rax+21h]  -> WindowJumping.IsJumping                Fields+0x11 -> obj+0x21
+[rbx+88h]  -> PickRay.PlayerStatus (PlayerStatus_o*) Fields+0x78 -> obj+0x88
+[rax+0A8h] -> PlayerStatus.IsJumpscared              Fields+0x98 -> obj+0xA8
+[rbx+4D0h] -> PickRay.buttonClicked                  Fields+0x4C0 -> obj+0x4D0
+[rbx+4D1h] -> PickRay.buttonClicked2                 Fields+0x4C1 -> obj+0x4D1
+[rbx+4E8h] -> PickRay.Inventory (Inventory_o*)       Fields+0x4D8 -> obj+0x4E8
+[rbx+538h] -> PickRay.MainInteract (KeyCode)         Fields+0x528 -> obj+0x538
+[rbx+53Ch] -> PickRay.DropKey (KeyCode)              Fields+0x52C -> obj+0x53C
+All exactly match task's cited semantics (FallingHolder+129/+130 = 0x81/0x82 = isFalling/isLanding;
+WJ.IsJumping; PlayerStatus.IsJumpscared).
+
+--- The actual generic Inventory.PickupItem call site ---
+Only ONE call to Inventory.PickupItem (0x1802459b0) exists in the whole function: 0x18023f8e7.
+Block at 0x18023f637-0x18023f950 (reuses var_9F0 RaycastHit, no fresh raycast, no fresh
+FallingHolder/WJ/PlayerStatus check -- those were already applied at 0x18023a0e1/0x18023a11e/etc
+when var_9F0 was populated):
+  0x18023f68a  Object.op_Implicit(itemSeedData) null-check -> else fall to next name block (0x18023F9B3)
+  0x18023f6d9  itemSeedData.name != StringLiteral_4978 -> else fall through
+  0x18023f721  a SECOND ItemSeedData ref's .name != StringLiteral_5970 -> else skip to 0x18023F9B3
+  0x18023f785  ... != StringLiteral_2057 -> else skip to 0x18023F9B3
+  0x18023f797  call PickRay.TurnOffItemTexts
+  0x18023f7f1  call Inventory.GetItemDefByName(inventory=[rbx+4E8h], name=hitItemSeedData.name)
+  0x18023f80e / 0x18023f86f  SetActive(true) on prompt UI, TMP_Text set to item name
+  0x18023f874  cmp [rbx+4D0h],0 ; jz loc_180242595     <- buttonClicked check gating the actual pickup
+  0x18023f883  buttonClicked = false                    <- consumed here
+  0x18023f88d  call PickRay.CheckItemDropping
+  0x18023f8e7  call Inventory.PickupItem(inventory, itemName)   <-- THE call
+  0x18023f935  itemSeedData.name == StringLiteral_2330 -> call PickRay.PickShotgun (chained extra logic)
+A separate, earlier block (0x18023f400-0x18023f5cd) handles a "Poison trap" item (StringLiteral_2054,
+resolved by IDA to literal text "Poison trap") the same way but calls Object.Destroy on the hit
+collider's GameObject instead of Inventory.PickupItem -- i.e. some ItemSeedData-tagged objects are
+"trap" triggers, not inventory adds, dispatched by the identical buttonClicked/raycast machinery.
+
+StringLiteral_2057/4978/5970/2330/6408/6472/811/2054/etc are IL2CPP lazily-resolved metadata-usage
+tokens (pointer slot holds an 0xA000_00xx sentinel, not a live System.String*, until first touched at
+runtime) -- exact text for most of them is NOT statically resolvable from the raw binary image. IDA's
+own disasm auto-comments resolved a few ("Poison trap" @ 2054, "There's something inside this
+watermelon" @ 4338, "key" @ 811, "animation" @ 2811) but show only a single truncated character for
+others ("b" @ 6408/2057/4978/2330/6472, "g" @ 5970, "s" @ 6472). Flagged UNVERIFIED -- would need a
+runtime dump to pin down which exact item names correspond to which block.
+
+--- Time/cooldown/audio gates found ---
+- 0x18023a1ec: AudioSource.isPlaying check on PickRay's OWN AudioSource gates only the FIRST
+  ("b"-string / chargebulb-adjacent) item block -- if true, skips that block (buttonClicked untouched,
+  falls through to try other item names). NOT present on the generic Inventory.PickupItem block traced
+  above -- that block has no isPlaying/cooldown gate of its own.
+- 0x1802425ca-0x1802426ae: PlayerPrefs.GetFloat/SetFloat/Save keyed by StringLiteral_811 ("key",
+  resolved) -- a persistent "watermelon hint shown" COUNTER (increments via addss, not a wall-clock
+  cooldown), gated on [rbx+4F4h], sitting in the shared post-rejection housekeeping region
+  (0x1802425a7 onward). Unrelated to Inventory.PickupItem; no Time.deltaTime dependency.
+- No Time.deltaTime / Time.time / Time.timeScale / coroutine / WaitForSeconds reference found anywhere
+  in PickRay.Update, Inventory.PickupItem, Inventory.GetItemDefByName, Inventory.DropLogic, or
+  PickRay.CheckItemDropping.
+- Input.GetKey (not GetKeyDown) appears exactly twice in the whole function (0x18023fd1f, 0x18023ff6a),
+  both AFTER the PickupItem call site, reading PickRay.ShootKey for continuous weapon-fire hold logic --
+  unrelated to picking items up. No mouse button, Input.mousePosition, EventSystem/UI Button.onClick,
+  or touch path is used anywhere in the pickup dispatch chain.
+
+[[IDA:Inventory_PickupItem_0x1802459b0]]
+void Inventory__PickupItem(Inventory_o *this, System_String_o *itemName, const MethodInfo *method)
+{
+  // lazily resolves a few MethodInfo/TypeInfo statics on first call (byte_180CE4491/byte_180CE4494 guards)
+  v8 = List<ItemDefs>.Find(predicate matching itemName, built via a closure over itemName);
+  Inventory.DropLogic(this);              // called UNCONDITIONALLY, before checking whether v8/find succeeded
+  if (v8 == 0) goto LABEL_22;              // not found -> silent early-out (falls to a null-guard stub, no visible player-facing effect)
+  if (UnityEngine.Object.op_Implicit(*(v8+24))) // the found ItemDefs entry's icon GameObject
+    ((GameObject*)*(v8+24))->SetActive(true);
+  if (UnityEngine.Object.op_Implicit(this->Audio))
+    if (UnityEngine.Object.op_Inequality(*(v8+56), null))   // the item's AudioClip
+      if (this->Audio != null)
+        this->Audio.PlayOneShot(*(v8+56));
+}
+No Time.*, no UnityEngine.Random, no PlayerPrefs anywhere in this function. No inventory-full check, no
+duplicate-item check, no "already picked" flag anywhere in this function -- calling PickupItem twice
+with the same name would simply re-enable the icon and replay the pickup sound a second time; nothing
+here silently no-ops a repeat call. DropLogic runs every single call regardless of whether the named
+item was found.
+
+[[IDA:Inventory_GetItemDefByName_0x1802457e0]]
+ItemDefs_o *Inventory__GetItemDefByName(Inventory_o *this, System_String_o *name, const MethodInfo *method)
+{
+  // plain linear scan over this->ItemDefs (List<ItemDefs>), comparing entry.itemName via String.op_Equality
+  for (i = 0; i < ItemDefs.Count; i++) {
+    entry = ItemDefs[i];
+    if (entry.itemName == name) return entry;
+  }
+  return null;
+}
+No Time.*, no RNG, no PlayerPrefs. Pure name lookup.
+
+[[IDA:Inventory_DropLogic_0x1802454d0]]
+Iterates this->ItemDefs (List<ItemDefs>), and for each entry whose internal HashSet-backed "slots" object
+is active, SetActive(false)s it, Instantiate()s a drop prefab (this->ItemsPrefab) at a stored
+position/rotation, and GetComponent<ItemSpawn>()s the result to stamp a float field. No Time.*, no RNG,
+no PlayerPrefs. Purely a "flush any currently-displayed dropped-item slot back into the world" sweep,
+run unconditionally at the top of every PickupItem call.
+
+[[IDA:PickRay_CheckItemDropping_0x180233070]]
+Handles DROPPING whatever is currently held (crossbow/dart energy check + Instantiate, shotgun shell
+drop + hand-transform reset to a "zero pos/rot", freeze trap drop + Rigidbody.AddForce, or falling
+through to Inventory.DropLogic if none of PickRay's H_CR/H_DSH/H_FT/H_PTRAP "currently held" GameObjects
+are active). Clears PickRay.buttonClicked2 (NOT buttonClicked) in every branch. No Time.*, no RNG, no
+PlayerPrefs. Consumed only from the DropKey path and from inside both PickupItem-adjacent blocks
+(0x18023f57d and 0x18023f88d) right before the pickup name re-check -- i.e. dropping the currently-held
+item is treated as a prerequisite step interleaved into the same-frame pickup sequence, not a separate
+frame's action.
+
+Verification method: insn_query() windowed disassembly across 0x180237ce0-0x1802429d0 (function bounds),
+xrefs_to() to confirm shared jump targets (loc_18024250B, loc_1802429ca/c4), decompile() for the three
+small non-monolithic helper functions (PickupItem/GetItemDefByName/DropLogic), and type_inspect() on
+PickRay_Fields/FallingHolder_Fields/WindowJumping_Fields/PlayerStatus_Fields local types to convert every
+raw [rbx+NNh] offset into a named field with provenance. IDB was NOT modified (no renames/comments/type
+edits written) per task instruction -- this file is the only artifact of the pass besides
+docs/ida-pickup-findings.md.

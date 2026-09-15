@@ -1,0 +1,82 @@
+AI_Granny.FixedUpdate at 0x1801bdcc0, inspected 2026-09-11.
+Native agent speed assignments; the engine integration clock is not present in GameAssembly.
+
+                                      method: nullptr);
+                                    this = (AI_Granny_o *)v2->fields.Agent; /*0x1801bfcbe*/
+                                    if ( this == nullptr ) /*0x1801bfcc8*/
+                                      goto LABEL_631; /*0x1801bfcc8*/
+                                    UnityEngine_AI_NavMeshAgent__set_speed( /*0x1801bfcd4*/
+                                      (UnityEngine_AI_NavMeshAgent_o *)this,
+                                      value: 0.0,
+                                      method: nullptr);
+                                    this = (AI_Granny_o *)v2->fields.Agent; /*0x1801bfcd9*/
+
+                      {
+                        this = (AI_Granny_o *)v2->fields.Agent; /*0x1801bfe16*/
+                        if ( this != nullptr ) /*0x1801bfe20*/
+                        {
+                          UnityEngine_AI_NavMeshAgent__set_speed( /*0x1801bfe2c*/
+                            (UnityEngine_AI_NavMeshAgent_o *)this,
+                            value: 0.0,
+                            method: nullptr);
+                          goto LABEL_416; /*0x1801bfe31*/
+
+                      {
+                        this = (AI_Granny_o *)v2->fields.Agent; /*0x1801bfdf1*/
+                        if ( this != nullptr ) /*0x1801bfdfb*/
+                        {
+                          UnityEngine_AI_NavMeshAgent__set_speed( /*0x1801bfe0c*/
+                            (UnityEngine_AI_NavMeshAgent_o *)this,
+                            value: v2->fields.Run_Speed,
+                            method: nullptr);
+                          goto LABEL_416; /*0x1801bfe11*/
+
+                    {
+                      this = (AI_Granny_o *)v2->fields.Agent; /*0x1801bfefc*/
+                      if ( this != nullptr ) /*0x1801bff06*/
+                      {
+                        UnityEngine_AI_NavMeshAgent__set_speed( /*0x1801bff12*/
+                          (UnityEngine_AI_NavMeshAgent_o *)this,
+                          value: 0.0,
+                          method: nullptr);
+                        Player = (UnityEngine_Transform_o *)v2->fields.Agent; /*0x1801bff17*/
+
+                        if ( this == nullptr ) /*0x1801c01d5*/
+                          goto LABEL_631; /*0x1801c01d5*/
+                        Run_Speed = v2->fields.Run_Speed; /*0x1801c01db*/
+                      }
+                      UnityEngine_AI_NavMeshAgent__set_speed( /*0x1801c01fb*/
+                        (UnityEngine_AI_NavMeshAgent_o *)this,
+                        value: Run_Speed,
+                        method: nullptr);
+                      v252 = UnityEngine_Component__get_transform(this: (UnityEngine_Component_o *)v2, method: nullptr); /*0x1801c0205*/
+
+                      {
+                        this = (AI_Granny_o *)v2->fields.Agent; /*0x1801c033e*/
+                        if ( this == nullptr ) /*0x1801c0348*/
+                          goto LABEL_631; /*0x1801c0348*/
+                        UnityEngine_AI_NavMeshAgent__set_speed( /*0x1801c0354*/
+                          (UnityEngine_AI_NavMeshAgent_o *)this,
+                          value: 0.0,
+                          method: nullptr);
+                        this = (AI_Granny_o *)v2->fields.WashingDishes; /*0x1801c0359*/
+
+                        if ( this == nullptr ) /*0x1801c0413*/
+                          goto LABEL_631; /*0x1801c0413*/
+                        Walk_Speed = v2->fields.Walk_Speed; /*0x1801c0419*/
+                      }
+                      UnityEngine_AI_NavMeshAgent__set_speed( /*0x1801c0439*/
+                        (UnityEngine_AI_NavMeshAgent_o *)this,
+                        value: Walk_Speed,
+                        method: nullptr);
+                      this = (AI_Granny_o *)v2->fields.WalkAnim; /*0x1801c043e*/
+
+                                    {
+                                      this = (AI_Granny_o *)v2->fields.Agent; /*0x1801c0e89*/
+                                      if ( this == nullptr ) /*0x1801c0e93*/
+                                        goto LABEL_630; /*0x1801c0e93*/
+                                      UnityEngine_AI_NavMeshAgent__set_speed( /*0x1801c0e9f*/
+                                        (UnityEngine_AI_NavMeshAgent_o *)this,
+                                        value: 0.0,
+                                        method: nullptr);
+                                      this = (AI_Granny_o *)v2->fields.Agent; /*0x1801c0ea4*/

@@ -1,0 +1,336 @@
+Granny Legacy 1.8.9 GameAssembly.dll -- native decompilations gathered for TAS determinism analysis
+IDB: C:\Users\ir0n1c\Desktop\Granny_Legacy\GameAssembly.dll.i64  (imagebase 0x180000000)
+Session date: 2026-09-11
+
+===========================================================================
+[[IDA:MobileFPS_ApplyFinalMovements_0x18022ce70]]
+===========================================================================
+void MobileFPS__ApplyFinalMovements(MobileFPS_o *this, const MethodInfo *method)
+{
+  if ( !this->fields.isMoving )
+  {
+    this->fields.moveDirection.fields.x = 0.0;
+    this->fields.moveDirection.fields.z = 0.0;
+  }
+  characterController = this->fields.characterController;
+  v3 = moveDirection (x,y,z as __m128/float)
+  deltaTime = UnityEngine_Time__get_deltaTime(method: nullptr);
+  // motion.x = moveDirection.x * deltaTime
+  // motion.y = moveDirection.y * deltaTime
+  // motion.z = moveDirection.z * deltaTime
+  UnityEngine_CharacterController__Move(this: characterController, motion: &v10, method: nullptr);
+}
+NOTE: uses UnityEngine.Time.get_deltaTime (NOT fixedDeltaTime, NOT unscaledDeltaTime).
+Motion passed to CharacterController.Move is moveDirection (a speed vector, units/sec) times deltaTime once (linear, not squared).
+
+===========================================================================
+[[IDA:MobileFPS_HandleVerticalMovement_0x18022d5f0]]
+===========================================================================
+void MobileFPS__HandleVerticalMovement(MobileFPS_o *this, const MethodInfo *method)
+{
+  characterController = this->fields.characterController;
+  if ( characterController == nullptr ) goto LABEL_8;
+  if ( UnityEngine_CharacterController__get_isGrounded(this: characterController, method: nullptr) )
+    return;                                    // no gravity applied while grounded
+  ...
+  FallSpeed_low = this->fields.FallSpeed;       // this is a scalar speed (m/s), NOT integrated here
+  static_fields = UnityEngine_Vector3_TypeInfo->static_fields;
+  downVector = static_fields->downVector;       // Vector3.down
+  deltaTime = UnityEngine_Time__get_deltaTime(method: nullptr);
+  // motion = FallSpeed * Vector3.down * deltaTime   (single deltaTime multiply, NOT dt^2)
+  ...
+  UnityEngine_CharacterController__Move(this: v5, motion: &v14, method: nullptr);
+}
+NOTE: FallSpeed itself is a stored field that some OTHER code path increments over time (not shown
+inside this function -- FallSpeed accumulation happens elsewhere, e.g. FallingHolder component or
+AdjustSpeed). HandleVerticalMovement only does motion = FallSpeed * down * deltaTime, a single
+linear multiply by Time.deltaTime -- frame-rate tolerant as long as FallSpeed itself is integrated
+with dt elsewhere (not verified in this session -- AdjustSpeed/FallingHolder not decompiled this pass).
+
+===========================================================================
+[[IDA:MobileFPS_Update_0x18022d9c0]]
+===========================================================================
+Handles horizontal WASD movement directly (not through ApplyFinalMovements in this path):
+  Axis = Input.GetAxis/GetAxisRaw("Horizontal"/"Vertical") depending on a PlayerPrefs toggle
+       (UnityEngine.Internal.InputUnsafeUtility$$GetAxis / GetAxisRaw)
+  inputVec = (h, 0, v); if magnitude>1 normalize
+  moveDir = moveSpeed * inputVec
+  moveDirection = transform.TransformDirection(moveDir)
+  isMoving = (moveDirection.magnitude > 0)
+  motion = moveDirection * Time.deltaTime   <-- again single multiply by Time.get_deltaTime
+  CharacterController.Move(motion)
+Also calls MobileFPS$$GetTouchInput (mouse look) when this->CamK is true and Horizontal/Vertical
+axis is nonzero. Falling-path duplicate logic (FallSpeed * Vector3.down * deltaTime) is inlined
+here too for the not-grounded branch, matching HandleVerticalMovement.
+
+===========================================================================
+[[IDA:MobileFPS_GetTouchInput_0x18022d030]]  <-- ACTUAL mouse-look logic
+===========================================================================
+void MobileFPS__GetTouchInput(MobileFPS_o *this, const MethodInfo *method)
+{
+  mouseY = UnityEngine.Internal.InputUnsafeUtility.GetAxis(StringLiteral_953);  // presumed "Mouse X"/"Mouse Y" pair, exact text unresolved (IL2CPP interned string, needs global-metadata.dat)
+  yawDelta = mouseY_axisValue * cameraRotationSpeed;
+  rotationX -= (GetAxis(StringLiteral_955) * cameraRotationSpeed);
+  rotationX = Clamp(rotationX, minXRotation, maxXRotation);
+  playerCamera.localRotation = Quaternion.Euler(rotationX, 0, 0);   // pitch (camera pivot)
+  bodyYawQuat = Quaternion.Euler(0, yawDelta, 0);
+  transform.rotation = transform.rotation * bodyYawQuat;            // yaw (player body)
+}
+CRITICAL: NO Time.deltaTime multiplication anywhere in this function. Mouse input is applied as
+raw per-frame Input.GetAxis(...) delta * cameraRotationSpeed, with NO dt scaling. Uses the legacy
+input API (UnityEngine.Internal.InputUnsafeUtility.GetAxis -- the native backing for the old
+Input.GetAxis("Mouse X"/"Mouse Y")). rotationX is clamped every call between minXRotation and
+maxXRotation (Mathf.Clamp semantics, confirmed via the two-branch compare-and-select in the
+decompilation). GetTouchInput itself is only invoked from Update() when this->CamK is set and a
+Horizontal/Vertical axis is nonzero (see MobileFPS$$Update above) -- so mouse look updates are
+gated on movement input in this build, not called unconditionally every frame.
+
+===========================================================================
+[[IDA:MobileFPS_DragHead_0x18022cfc0]] / [[IDA:MobileFPS_DragHeadTimer_MoveNext_0x180242a30]]
+===========================================================================
+DragHead() just starts a coroutine (DragHeadTimer). The coroutine (MoveNext) is NOT the mouse-look
+code -- it's a delayed camera-reset: waits WaitForSeconds(0.45) (scaled time, respects Time.timeScale)
+then reads playerCamera.localEulerAngles.x into rotationX and re-applies it as a quaternion, setting
+this->CamK = true afterward. Not relevant to Q1/Q2 physics, but confirms CamK gating for GetTouchInput.
+
+===========================================================================
+[[IDA:AI_Granny_FixedUpdate_0x1801bdcc0]]  (huge: 2917 insns / 0x3670 bytes)
+===========================================================================
+Prior-session comment already on this function (left in IDB, verified plausible from decompile):
+"the real per-tick AI driver ... grannycheat hooks this rather than patching it ... AI_Granny fields:
++0x94 Walk_Speed, +0x98 Run_Speed, +0xA8 Agent(NavMeshAgent), +0xB0 CurrentTarget(Vec3),
++0xD0 Player(Transform), +0xE8 PlayerStatus, +0x164 IsBlind, +0x168 BlindTimer, +0x188 CaughtPlayer,
++0x18A IsSearching, +0x18B IsAngry"
+
+RNG usage (verified via disasm, not just callee list):
+1) UnityEngine.Random.RandomRangeInt call at 0x1801c0080, GATED behind a walking-timer state
+   transition: field [this+0x1A0] accumulates += Time.deltaTime every FixedUpdate tick; when it
+   reaches threshold [this+0x1A4], the timer resets, CrossFade animation plays, and if a "current
+   target reached" bool [this+0x18A] flips, the code does:
+       clip_index = Random.RandomRangeInt(0, clipList.Count);   // pick random idle/voice AudioClip
+   i.e. only fires on a state-change tick (walk-cycle threshold reached), not every physics tick.
+2) AI_Granny$$ChooseWaypoint (0x1801bda70) is called from the SAME state-transition block
+   (0x1801bfec4) and itself calls UnityEngine.Random.RandomRangeInt(0, Waypoints.Count) in a
+   retry-until-different-from-current loop:
+       do { WaypointNumb = Random.RandomRangeInt(0, Waypoints.Count); } while (WaypointNumb == CurrentWaypoint);
+   Also only on waypoint-completion / idle-timer-expiry, not every tick.
+No Random calls found in: SensorPlayer (0x1801c19d0), ChaseAction (0x1801bda40, trivial/near-empty),
+LookAtThings (0x1801bc6c0), ResetAIDecision (0x1801c1930), StopChase (0x1801c2230),
+OnTriggerStay (0x1801c1680).
+NavMeshAgent usage confirmed in FixedUpdate/SensorPlayer: SetDestination, get_destination,
+set_speed, set_isStopped/get_isStopped, get_velocity, set_baseOffset -- all driven every
+FixedUpdate tick as part of the chase/patrol state machine (SetDestination itself only called on
+state transitions per the callee count, not every tick).
+Multiple independent Time.deltaTime-driven timers accumulate inside FixedUpdate (walk-cycle timer
+@0x1A0/0x1A4, another @0x19C/0x198, a "murder noise"/idle timer @0x280/0x284, etc.) -- IMPORTANT:
+these all call UnityEngine.Time.get_deltaTime() (render-frame delta), even though they execute
+inside FixedUpdate (physics tick). Since Time.deltaTime != Time.fixedDeltaTime and FixedUpdate call
+frequency is decoupled from render frame rate, these AI timers' real-world accumulation rate is
+coupled to render frame rate, not physics tick count -- i.e. total elapsed "timer time" per
+FixedUpdate call varies with render FPS, NOT fixed per physics step.
+
+===========================================================================
+[[IDA:Eyes_Granny_FixedUpdate_0x1801ddb80]]
+===========================================================================
+No Random calls (confirmed via full callee list). Calls Time.get_deltaTime (vision timer decay),
+Physics.Linecast (line-of-sight check), Camera.WorldToViewportPoint (in-FOV check), and
+AI_Granny$$ChaseAction / StopChase on state transition. Deterministic given player/granny transform
+state and Time.deltaTime.
+
+===========================================================================
+[[IDA:Time_UnscaledFns_xrefs]]  -- Q4 answer
+===========================================================================
+Enumerated ALL callers of:
+  UnityEngine.Time$$get_unscaledDeltaTime  (0x18072b360) -- 5 xrefs
+  UnityEngine.Time$$get_unscaledTime       (0x18072b390) -- 34 xrefs
+  UnityEngine.Time$$get_realtimeSinceStartup (0x18072b270) -- 18 xrefs
+  UnityEngine.WaitForSecondsRealtime$$.ctor (0x180731480) -- 6 xrefs
+ALL callers across all four are UI/infrastructure classes only:
+  UnityEngine.UI.CoroutineTween.TweenRunner, UnityEngine.UI.Button, UnityEngine.UI.ScrollRect,
+  TMPro.TMP_InputField (+ its caret-blink coroutine), UnityEngine.UI.InputField (+ caret-blink),
+  TMPro.TMP_Dropdown / UnityEngine.UI.Dropdown (delayed-destroy coroutines),
+  UnityEngine.UIElements.ScrollView/PanelEventHandler/DefaultEventSystem.Input,
+  UnityEngine.EventSystems.StandaloneInputModule / TouchInputModule,
+  TMPro.Examples.TMP_FrameRateCounter (debug FPS display),
+  com.ootii.Utilities.Debug.Log (3rd-party bone-controller lib's own logging timestamps),
+  UnityEngine.Rendering.PostProcessing.GrainRenderer / Dithering (visual noise-only, render effect).
+NONE of these touch MobileFPS, AI_Granny, Eyes_Granny, or any gameplay *_Timer_d__NN coroutine
+state machine. Gameplay code exclusively uses Time.get_deltaTime (scaled) as verified in every
+function decompiled this session (ApplyFinalMovements, HandleVerticalMovement, Update, FixedUpdate
+x2, GetTouchInput uses no time function at all). This strongly suggests Time.timeScale-based
+speedhacks are NOT bypassed by any player-movement, AI, or timer-coroutine code path found so far.
+(Caveat: only representative sample of the ~30 Timer coroutines was checked structurally via
+MobileFPS's DragHeadTimer; the other 29 were not individually decompiled this session due to
+budget -- recommend a follow-up xref sweep of Time$$get_deltaTime vs the unscaled variants across
+all *_d__NN MoveNext functions if full coverage is required.)
+
+===========================================================================
+[[IDA:SeedManager_GeneratePlacement_0x18024f770]]  -- Bonus: rnd/Seed determinism
+===========================================================================
+Field layout observed (SeedManager instance, offsets from `this`):
+  +0x40 : int   Seed
+  +0x44 : bool  (RandomizeSeed toggle -- exact name not confirmed, inferred from control flow)
+  +0x50 : System.Random  rnd
+Disassembled control flow at function entry (0x18024fc70-0x18024fd12):
+  if ( this->field_0x44 == 0 )
+      this->Seed = PlayerPrefs.GetInt("<key, StringLiteral_6078>");   // persisted seed path
+  else
+      this->Seed = UnityEngine.Random.RandomRangeInt(0, 0x3B9AC9FF);  // 999,999,999 -- auto-seed path
+  ...
+  retry_loop (up to 50 attempts, var_2A8 counter, cap compared against 0x32=50):
+      attempt++;
+      this->rnd = new System.Random(this->Seed + attempt);   // System.Random ctor, seed = Seed+attempt
+      RestoreOriginalStates(); ... (placement attempt logic, PlaceItemAtTransform/PlaceItemInFreeArea/
+      PlaceItemInSpecificFreeArea, SeedManager$$Shuffle___Il2CppFullySharedGenericType_ for list
+      shuffling) ...
+CONFIRMED: this.rnd IS a System.Random constructed from (Seed + attemptNumber), so forcing `Seed`
+(and ensuring the RandomizeSeed toggle at +0x44 is false / not taken, or overriding it) makes the
+placement's internal RNG fully deterministic PROVIDED the number of retry attempts taken is itself
+deterministic (attempt count depends on placement-success feedback from the same PRNG stream, so it
+should be self-consistent/reproducible given a fixed Seed and fixed world/puzzle state).
+UnityEngine.Random.RandomRangeInt is called exactly ONCE in this whole function, ONLY as the
+auto-seed source when the +0x44 toggle is true -- it does NOT otherwise participate in item
+placement. SeedManager$$Shuffle___Il2CppFullySharedGenericType_ (0x1802d7590) is a List<T> Fisher-
+Yates-style shuffle; its RNG draws come from `this->rnd` (System.Random) via inlined helper thunks
+(sub_1800E18A0/sub_18019D430/sub_18019CD90), not from UnityEngine.Random -- consistent with full
+determinism once Seed is fixed and the +0x44 toggle path is avoided.
+TAS IMPLICATION: To get deterministic item placement, force SeedManager+0x44 == 0 (or whatever the
+real field name is -- likely "UseRandomSeed"/"RandomizeEachRun") AND set SeedManager+0x40 (Seed) to
+a fixed value before GeneratePlacement runs.
+
+===========================================================================
+Token -> Address bridge notes (for future sessions -- skip re-deriving this)
+===========================================================================
+Route used: Route B (IL2CPP codegen module), NOT the MethodAddressToToken.db file.
+MethodAddressToToken.db format reverse-engineered but NOT used for final resolution because
+Route B was faster once the codegen module was found:
+  Header: 'UMTM' (4 bytes) + version u32(=1) + assembly_count u32(=0x51=81) + method_count u32(=0x78ca=30922)
+  Then 81 length-prefixed (7-bit/LEB128-style single-byte-length since all <128) ASCII assembly
+  full-names starting at file offset 20, total block size 6700 bytes (matches the u32 at offset 16).
+  Then 30922 x 16-byte records, each two little-endian uint64 RVAs (start,end) -- global method
+  index order, NOT indexed by per-module RID directly; would need per-module method-count table to
+  map token RID -> global index. NOT fully solved -- abandoned in favor of Route B.
+
+Route B (used): Assembly-CSharp's Il2CppCodeGenModule struct located via the "Assembly-CSharp.dll"
+string (0x1809e4b78) <- xref from struct at VA 0x1809e4af0:
+  +0x00 moduleName (char*)            = 0x1809e4b78 ("Assembly-CSharp.dll")
+  +0x08 methodPointerCount (uint64)   = 0x82d (2093)
+  +0x10 methodPointers (ptr)          = 0x180c1cab0   <-- Il2CppMethodPointer[2093], indexed by RID-1
+  +0x18 adjustorThunkCount            = 0
+  +0x20 adjustorThunks                = 0
+  +0x28 invokerIndices                = 0x1809e29d0
+  (+ more fields not needed)
+Resolution formula: addr = *(uint64*)(0x180c1cab0 + (token & 0xFFFFFF - 1) * 8)
+All addresses below independently verified: IDA already had Il2CppInterop-derived symbol names
+(e.g. "MobileFPS$$ApplyFinalMovements") applied at every resolved address, confirming correctness.
+
+Token -> Address map (verified):
+  MobileFPS.Start                    0x600058E -> 0x18022d9b0  MobileFPS$$Start
+  MobileFPS.Awake                    0x600058F -> 0x18022cf00  MobileFPS$$Awake
+  MobileFPS.Update                   0x6000590 -> 0x18022d9c0  MobileFPS$$Update
+  MobileFPS.GetTouchInput            0x6000591 -> 0x18022d030  MobileFPS$$GetTouchInput
+  MobileFPS.HandlePlayerMovement     0x6000592 -> 0x18022d470  MobileFPS$$HandlePlayerMovement
+  MobileFPS.HandlePlayerMovementS    0x6000593 -> 0x18022d2f0  MobileFPS$$HandlePlayerMovementS
+  MobileFPS.ApplyFinalMovements      0x6000594 -> 0x18022ce70  MobileFPS$$ApplyFinalMovements
+  MobileFPS.HandleVerticalMovement   0x6000595 -> 0x18022d5f0  MobileFPS$$HandleVerticalMovement
+  MobileFPS.AdjustSpeed              0x6000596 -> 0x18022ce60  MobileFPS$$AdjustSpeed
+  MobileFPS.DragHead                 0x6000598 -> 0x18022cfc0  MobileFPS$$DragHead
+  MobileFPS.DragHeadTimer(ctor)      0x6000599 -> 0x18022cf60  MobileFPS$$DragHeadTimer
+  MobileFPS._DragHeadTimer_d__47.MoveNext 0x60005A0 -> 0x180242a30
+  MobileFPS.OnControllerColliderHit  0x600059C -> 0x18022d6e0  MobileFPS$$OnControllerColliderHit
+  AI_Granny.Start                    0x6000108 -> 0x1801c1ec0  AI_Granny$$Start
+  AI_Granny.FixedUpdate              0x6000109 -> 0x1801bdcc0  AI_Granny$$FixedUpdate
+  AI_Granny.ResetAIDecision          0x600010C -> 0x1801c1930  AI_Granny$$ResetAIDecision
+  AI_Granny.SensorPlayer             0x6000114 -> 0x1801c19d0  AI_Granny$$SensorPlayer
+  AI_Granny.ChaseAction              0x6000115 -> 0x1801bda40  AI_Granny$$ChaseAction
+  AI_Granny.StopChase                0x6000116 -> 0x1801c2230  AI_Granny$$StopChase
+  AI_Granny.LookAtThings             0x6000117 -> 0x1801bc6c0  AI_Granny$$LookAtThings
+  AI_Granny.ChooseWaypoint           0x600011B -> 0x1801bda70  AI_Granny$$ChooseWaypoint
+  AI_Granny.OnTriggerStay            0x600011D -> 0x1801c1680  AI_Granny$$OnTriggerStay
+  Eyes_Granny.FixedUpdate            0x60001BA -> 0x1801ddb80  Eyes_Granny$$FixedUpdate
+  SeedManager.Awake                  0x6000635 -> 0x18024e910  SeedManager$$Awake
+  SeedManager.Start                  0x6000636 -> 0x180253750  SeedManager$$Start
+  SeedManager.GeneratePlacement      0x6000637 -> 0x18024f770  SeedManager$$GeneratePlacement
+  SeedManager.Shuffle<T>             0x6000643 -> 0x1802d7590  SeedManager$$Shuffle___Il2CppFullySharedGenericType_
+    (note: methodPointers[RID-1] for this token returned 0 -- Shuffle is a generic method, its
+    concrete instantiation address was found instead via func_query name-glob "*Shuffle*")
+
+Supporting Time/RNG function addresses:
+  UnityEngine.Time.get_deltaTime            0x18072b210
+  UnityEngine.Time.get_unscaledDeltaTime    0x18072b360
+  UnityEngine.Time.get_unscaledTime         0x18072b390
+  UnityEngine.Time.get_realtimeSinceStartup 0x18072b270
+  UnityEngine.WaitForSecondsRealtime..ctor  0x180731480
+  UnityEngine.Random.RandomRangeInt         0x180728f30
+  System.Random..ctor(int seed)             0x1804680d0 (System.Random$$.ctor_6447071440)
+
+===========================================================================
+[[IDA:MobileFPS_FallSpeed_accumulation_20260914]]  -- resolves the open "FallSpeed accumulation" item
+===========================================================================
+Session date: 2026-09-14.
+
+Field: MobileFPS.FallSpeed, MobileFPS_Fields offset 0x3c (object offset 0x4c in MobileFPS_o).
+
+1) The ONLY write to this field anywhere in the binary -- MobileFPS::.ctor (0x18022e580):
+
+void MobileFPS___ctor(MobileFPS_o *this, const MethodInfo *method)
+{
+  this->fields.moveSpeed = 5.0;
+  this->fields.SpeedMove = 6.0;
+  this->fields.SpeedMoveCrouch = 6.0;
+  this->fields.FallSpeed = 9.8100004;      /*0x18022e597*/
+  this->fields.cameraRotationSpeed = 2.0;
+  this->fields.maxXRotation = 80.0;
+  this->fields.minXRotation = -80.0;
+  ...
+}
+Disasm at the write:
+  0x18022e597   mov     dword ptr [rcx+4Ch], 411CF5C3h      ; 411CF5C3h == 9.8100004f
+
+2) Whole-binary search for any OTHER store to a "+4Ch" field (movss/mov dword ptr [reg+4Ch], all
+   registers, .text and il2cpp code segments) returns exactly ONE hit inside MobileFPS: the ctor
+   store above. All other "+4Ch" stores found belong to unrelated classes (com.ootii geometry/bone
+   utilities, TMPro text layout, UGUI/UIElements layout code, PostProcessing) -- confirmed by
+   per-hit function-name lookup, none are MobileFPS or FallingHolder.
+
+3) All three READ sites of MobileFPS.FallSpeed, confirmed via decompile+disasm:
+   a) MobileFPS::HandleVerticalMovement (0x18022d5f0):
+        0x18022d649  movss xmm7, dword ptr [rbx+4Ch]      ; FallSpeed
+        ...
+        deltaTime = UnityEngine_Time__get_deltaTime();
+        motion = FallSpeed * Vector3.down * deltaTime;    // single dt multiply
+        CharacterController.Move(motion);
+   b) MobileFPS::Update (0x18022d9c0), inlined not-grounded branch:
+        0x18022e383  FallSpeed_low = (__m128)LODWORD(this->fields.FallSpeed);
+        deltaTime = UnityEngine_Time__get_deltaTime();     /*0x18022e399*/
+        motion = FallSpeed * Vector3.down * deltaTime;
+        CharacterController.Move(motion);                  /*0x18022e3ea*/
+   c) MobileFPS::ApplyFinalMovements (0x18022ce70) -- horizontal-only in this build; does not
+      reference FallSpeed itself, confirmed by decompile (moveDirection * deltaTime only).
+   None of the three READ sites write FallSpeed back. No add/sub/mul-and-store to the field is
+   present anywhere -- it is read-only after construction.
+
+4) FallingHolder is a SEPARATE class/object; its own field also happens to sit at object offset
+   0x4c (FallingHolder_Fields.Speed, offset 0x4c is a field-table coincidence, not the same memory).
+   FallingHolder::Update (0x1802188d0) accumulates a FALL-DURATION TIMER, not a velocity:
+        0x1802189a1  v8 = this->fields.fallDuration;
+        0x1802189ab  Speed = this->fields.Speed;
+        0x1802189bc  v10 = UnityEngine_Time__get_deltaTime() * Speed;
+        0x1802189d5  this->fields.fallDuration = v10 + v8;      // fallDuration += dt * Speed
+        0x1802189ee  this->fields.DurateCan = UnityEngine_Time__get_deltaTime()*4.0 + DurateCan;
+   fallDuration is compared against FallMega/FallDurationHold/FallChecker thresholds to decide fall
+   damage/landing-sound/blood-splash, and zeroed on landing (FallingHolder::HandleLanding,
+   0x1802186d0). This is a duration/timer accumulator used for fall-damage gating, NOT the vertical
+   speed consumed by CharacterController.Move -- MobileFPS.FallSpeed and FallingHolder.Speed are
+   different fields on different classes despite the shared "Speed"-ish naming and offset.
+
+VERDICT: MobileFPS.FallSpeed does not accumulate at all. It is a compile-time constant (9.81,
+assigned once in the constructor) used as a flat downward speed, multiplied by Time.deltaTime
+exactly once per frame at every consumption site (HandleVerticalMovement and the inlined duplicate
+in Update). There is no `FallSpeed += gravity * dt` integration anywhere in the binary -- the
+player's fall speed is identical on the first frame of a fall and the 1000th frame of the same
+fall (no ramp-up). This is LINEAR IN DT (motion = 9.81 * down * dt, single multiply, not dt^2) but
+NOT an accumulator -- there is nothing to accumulate. Existing findings on frame-rate-independent
+fall distance-per-second stand; the only residual frame-rate sensitivity remains the discrete
+CharacterController.Move call count during a fall (collision-resolution granularity), unrelated to
+FallSpeed's own (nonexistent) integration.

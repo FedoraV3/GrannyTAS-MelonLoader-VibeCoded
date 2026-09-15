@@ -1,0 +1,297 @@
+IDA review 2026-09-11; native pseudocode with call-site addresses.
+Existing analyst comments are not independent evidence.
+
+PickRay.Update (0x180237ce0): input gating
+  UnityEngine_GameObject__SetActive(this: (UnityEngine_GameObject_o *)AmmoUI1, value: v204, method: nullptr); /*0x18023953b*/
+LABEL_214:
+  if ( UnityEngine_Input__GetKeyDown(key: this->fields.MainInteract, method: nullptr) ) /*0x18023954b*/
+  {
+    AmmoUI1 = (intptr_t)this->fields.Ring; /*0x180239558*/
+    if ( AmmoUI1 == 0 ) /*0x18023955f*/
+      goto LABEL_1793; /*0x18023955f*/
+    if ( UnityEngine_GameObject__get_activeSelf(this: (UnityEngine_GameObject_o *)AmmoUI1, method: nullptr) /*0x180239585*/
+      && !Paused_TypeInfo->static_fields->IsPaused )
+    {
+      AmmoUI1 = (intptr_t)this->fields.Player; /*0x18023958b*/
+      if ( AmmoUI1 == 0 ) /*0x180239592*/
+        goto LABEL_1793; /*0x180239592*/
+      UnityEngine_GameObject__GetComponent___Il2CppFullySharedGenericType_( /*0x1802395a3*/
+        retstr: (Unity_IL2CPP_Metadata___Il2CppFullySharedGenericType_o *)AmmoUI1,
+        this: (UnityEngine_GameObject_o *)&v632.monitor,
+        method: (const MethodInfo_2B7FD0 *)Method_UnityEngine_GameObject_GetComponent_FallingHolder___);
+      if ( v632.monitor == nullptr ) /*0x1802395af*/
+        goto LABEL_1793; /*0x1802395af*/
+      if ( *((_BYTE *)v632.monitor + 129) == 0 ) /*0x1802395bc*/
+      {
+        AmmoUI1 = (intptr_t)this->fields.Player; /*0x1802395be*/
+        if ( AmmoUI1 == 0 ) /*0x1802395c5*/
+          goto LABEL_1793; /*0x1802395c5*/
+        UnityEngine_GameObject__GetComponent___Il2CppFullySharedGenericType_( /*0x1802395d6*/
+          retstr: (Unity_IL2CPP_Metadata___Il2CppFullySharedGenericType_o *)AmmoUI1,
+          this: (UnityEngine_GameObject_o *)&v632.fields,
+          method: (const MethodInfo_2B7FD0 *)Method_UnityEngine_GameObject_GetComponent_FallingHolder___);
+        if ( v632.fields.m_CachedPtr == 0 ) /*0x1802395e2*/
+          goto LABEL_1793; /*0x1802395e2*/
+        if ( *(_BYTE *)(v632.fields.m_CachedPtr + 130) == 0 ) /*0x1802395ef*/
+        {
+          v205 = this->fields.WJ; /*0x1802395f1*/
+          if ( v205 == nullptr ) /*0x1802395fb*/
+            goto LABEL_1793; /*0x1802395fb*/
+          if ( !v205->fields.IsJumping ) /*0x180239605*/
+          {
+            v206 = this->fields.PlayerStatus; /*0x180239607*/
+            if ( v206 == nullptr ) /*0x180239611*/
+              goto LABEL_1793; /*0x180239611*/
+            if ( !v206->fields.IsJumpscared ) /*0x18023961e*/
+              this->fields.buttonClicked = true; /*0x180239620*/
+          }
+        }
+      }
+    }
+  }
+
+PickRay.Update: falling/landing rejection and ring hiding
+    method: (const MethodInfo_2B7FD0 *)Method_UnityEngine_GameObject_GetComponent_FallingHolder___);
+  if ( v635.fields.m_CachedPtr == 0 ) /*0x18023a0d4*/
+    goto LABEL_1793; /*0x18023a0d4*/
+  if ( *(_BYTE *)(v635.fields.m_CachedPtr + 129) != 0 ) /*0x18023a0e1*/
+    goto LABEL_1747; /*0x18023a0e1*/
+  AmmoUI1 = (intptr_t)this->fields.Player; /*0x18023a0e7*/
+  if ( AmmoUI1 == 0 ) /*0x18023a0ee*/
+    goto LABEL_1793; /*0x18023a0ee*/
+  UnityEngine_GameObject__GetComponent___Il2CppFullySharedGenericType_( /*0x18023a102*/
+    retstr: (Unity_IL2CPP_Metadata___Il2CppFullySharedGenericType_o *)AmmoUI1,
+    this: &v636,
+    method: (const MethodInfo_2B7FD0 *)Method_UnityEngine_GameObject_GetComponent_FallingHolder___);
+  if ( v636.klass == nullptr ) /*0x18023a111*/
+    goto LABEL_1793; /*0x18023a111*/
+  if ( BYTE2(v636.klass->_1.fields) != 0 ) /*0x18023a11e*/
+    goto LABEL_1747; /*0x18023a11e*/
+  v278 = this->fields.WJ; /*0x18023a124*/
+  if ( v278 == nullptr ) /*0x18023a12e*/
+    goto LABEL_1793; /*0x18023a12e*/
+  if ( v278->fields.IsJumping ) /*0x18023a134*/
+    goto LABEL_1747; /*0x18023a138*/
+  v279 = this->fields.PlayerStatus; /*0x18023a13e*/
+  if ( v279 == nullptr ) /*0x18023a148*/
+    goto LABEL_1793; /*0x18023a148*/
+  if ( v279->fields.IsJumpscared ) /*0x18023a14e*/
+  {
+LABEL_1747:
+    PickRay__TurnOffItemTexts(this, method: nullptr); /*0x180242510*/
+    this->fields.buttonClicked = false; /*0x180242515*/
+    AmmoUI1 = (intptr_t)this->fields.Ring; /*0x18024251c*/
+    if ( AmmoUI1 == 0 ) /*0x180242523*/
+      goto LABEL_1792; /*0x180242523*/
+    UnityEngine_GameObject__SetActive(this: (UnityEngine_GameObject_o *)AmmoUI1, value: false, method: nullptr); /*0x18024252e*/
+    AmmoUI1 = (intptr_t)this->fields.FuelTankButton; /*0x180242533*/
+
+FallingHolder.Update (0x1802188d0)
+// FallingHolder::Update -- fall/land bookkeeping.
+// 
+// WARNING for anything that stops time: this method is WRONG rather than merely
+// idle at deltaTime == 0. It reads CharacterController.isGrounded, which reports
+// false when the controller is moved by zero (which is what MobileFPS::Update
+// does at timeScale 0), and latches isFalling = true with no path to clear it.
+// AI_Granny's jumpscare gate (0x1C0E45) requires !isFalling, and CrouchHolder
+// refuses to crouch while it is set. Skip this whole call while frozen.
+void FallingHolder__Update(FallingHolder_o *this, const MethodInfo *method)
+{
+  __int64 v3; // rdx
+  __int64 v4; // rdx
+  __int64 v5; // rdx
+  UnityEngine_AudioSource_o *Falling; // rcx
+  struct MobileFPS_o *FPS; // rax
+  float v8; // xmm7_4
+  float Speed; // xmm6_4
+  float v10; // xmm0_4
+  float DurateCan; // xmm6_4
+  Il2CppObject *BloodSplashHead; // rdi
+  UnityEngine_Vector3_o *position; // rax
+  __int64 v14; // rdx
+  float z; // esi
+  __int64 v16; // xmm7_8
+  struct UnityEngine_Quaternion_StaticFields v17; // xmm6
+  float fallDuration; // xmm0_4
+  bool v19; // cc
+  UnityEngine_Vector3_o v20; // [rsp+20h] [rbp-48h] BYREF
+  UnityEngine_Quaternion_o identityQuaternion; // [rsp+30h] [rbp-38h] BYREF
+  UnityEngine_Component_o v22; // [rsp+70h] [rbp+8h] BYREF
+
+  if ( byte_180CE43FB == 0 ) /*0x1802188e0*/
+  {
+    sub_180138640(a1: &Method_UnityEngine_Component_GetComponent_CrouchHolder___, a2: method); /*0x1802188e9*/
+    sub_180138640(a1: &Method_UnityEngine_Object_Instantiate_GameObject____6455276512, a2: v3); /*0x1802188f5*/
+    sub_180138640(a1: &UnityEngine_Object_TypeInfo, a2: v4); /*0x180218901*/
+    sub_180138640(a1: &StringLiteral_5260, a2: v5); /*0x18021890d*/
+    byte_180CE43FB = 1; /*0x180218912*/
+  }
+  if ( this->fields.DurateCan > 0.5 ) /*0x18021893f*/
+  {
+    Falling = this->fields.Falling; /*0x180218941*/
+    if ( Falling == nullptr ) /*0x180218948*/
+      goto LABEL_49; /*0x180218948*/
+    UnityEngine_AudioSource__set_volume(this: Falling, value: 0.25, method: nullptr); /*0x180218959*/
+  }
+  Falling = (UnityEngine_AudioSource_o *)this->fields.ch; /*0x18021895e*/
+  if ( Falling == nullptr ) /*0x180218965*/
+    goto LABEL_49; /*0x180218965*/
+  if ( UnityEngine_CharacterController__get_isGrounded( /*0x18021896d*/
+         this: (UnityEngine_CharacterController_o *)Falling,
+         method: nullptr) )
+  {
+    goto LABEL_23; /*0x18021896d*/
+  }
+  FPS = this->fields.FPS; /*0x18021897a*/
+  if ( FPS == nullptr ) /*0x180218981*/
+    goto LABEL_49; /*0x180218981*/
+  if ( FPS->fields.InElev ) /*0x180218987*/
+  {
+LABEL_23:
+    fallDuration = this->fields.fallDuration; /*0x180218b1d*/
+    v19 = fallDuration <= this->fields.FallMega; /*0x180218b27*/
+    this->fields.DurateCan = 0.0; /*0x180218b2b*/
+    if ( !v19 ) /*0x180218b31*/
+    {
+      if ( !this->fields.Fell && this->fields.DeathFall ) /*0x180218c33*/
+      {
+        Falling = this->fields.Falling; /*0x180218c3c*/
+        *(_WORD *)&this->fields.CanFallSound = 0; /*0x180218c40*/
+        if ( Falling == nullptr ) /*0x180218c4a*/
+          goto LABEL_49; /*0x180218c4a*/
+        UnityEngine_AudioSource__set_volume(this: Falling, value: 0.0, method: nullptr); /*0x180218c56*/
+        Falling = (UnityEngine_AudioSource_o *)this->fields.PlayerStatus; /*0x180218c5b*/
+        *(_QWORD *)&this->fields.fallDuration = 0; /*0x180218c5f*/
+        if ( Falling == nullptr ) /*0x180218c69*/
+          goto LABEL_49; /*0x180218c69*/
+        PlayerStatus__NormalDeath(this: (PlayerStatus_o *)Falling, method: nullptr); /*0x180218c71*/
+        Falling = (UnityEngine_AudioSource_o *)this->fields.PlayerStatus; /*0x180218c76*/
+        if ( Falling == nullptr ) /*0x180218c7d*/
+          goto LABEL_49; /*0x180218c7d*/
+        PlayerStatus__DamageFeet(this: (PlayerStatus_o *)Falling, method: nullptr); /*0x180218c81*/
+      }
+      goto LABEL_43; /*0x180218c81*/
+    }
+    if ( fallDuration > this->fields.FallDurationHold ) /*0x180218b3b*/
+    {
+      if ( !this->fields.Damaged ) /*0x180218c0b*/
+        goto LABEL_14; /*0x180218c0b*/
+      goto LABEL_43; /*0x180218c0b*/
+    }
+    if ( fallDuration <= this->fields.FallChecker ) /*0x180218b45*/
+    {
+      Falling = this->fields.Falling; /*0x180218b47*/
+      *(_WORD *)&this->fields.CanFallSound = 0; /*0x180218b4b*/
+      this->fields.fallDuration = 0.0; /*0x180218b52*/
+      if ( Falling == nullptr ) /*0x180218b5b*/
+        goto LABEL_49; /*0x180218b5b*/
+      UnityEngine_AudioSource__set_volume(this: Falling, value: 0.0, method: nullptr); /*0x180218b67*/
+      goto LABEL_43; /*0x180218b6c*/
+    }
+    UnityEngine_Component__GetComponent___Il2CppFullySharedGenericType_( /*0x180218b80*/
+      retstr: (Unity_IL2CPP_Metadata___Il2CppFullySharedGenericType_o *)this,
+      this: &v22,
+      method: (const MethodInfo_2AC530 *)Method_UnityEngine_Component_GetComponent_CrouchHolder___);
+    if ( v22.klass != nullptr ) /*0x180218b8d*/
+    {
+      if ( BYTE2(v22.klass->_1.fields) != 0 ) /*0x180218b9a*/
+      {
+        UnityEngine_Component__GetComponent___Il2CppFullySharedGenericType_( /*0x180218bab*/
+          retstr: (Unity_IL2CPP_Metadata___Il2CppFullySharedGenericType_o *)this,
+          this: &v22,
+          method: (const MethodInfo_2AC530 *)Method_UnityEngine_Component_GetComponent_CrouchHolder___);
+        Falling = (UnityEngine_AudioSource_o *)v22.klass; /*0x180218bb0*/
+        if ( v22.klass == nullptr ) /*0x180218bb8*/
+          goto LABEL_49; /*0x180218bb8*/
+        CrouchHolder__StopCrouch(this: (CrouchHolder_o *)v22.klass, method: nullptr); /*0x180218bc0*/
+      }
+      Falling = this->fields.LandTiny; /*0x180218bc5*/
+      if ( Falling != nullptr ) /*0x180218bcc*/
+      {
+        UnityEngine_AudioSource__Play_6449760032(this: Falling, method: nullptr); /*0x180218bd4*/
+        Falling = this->fields.Falling; /*0x180218bd9*/
+        *(_WORD *)&this->fields.CanFallSound = 0; /*0x180218bdd*/
+        if ( Falling != nullptr ) /*0x180218be7*/
+        {
+          UnityEngine_AudioSource__set_volume(this: Falling, value: 0.0, method: nullptr); /*0x180218bf3*/
+          *(_QWORD *)&this->fields.fallDuration = 0; /*0x180218bf8*/
+          goto LABEL_43; /*0x180218bff*/
+        }
+      }
+    }
+LABEL_49:
+    sub_180138830(a1: Falling, a2: method); /*0x180218cf8*/
+  }
+  if ( !this->fields.isLanding ) /*0x18021899b*/
+  {
+    v8 = this->fields.fallDuration; /*0x1802189a1*/
+    Speed = this->fields.Speed; /*0x1802189ab*/
+    this->fields.isFalling = true; /*0x1802189b0*/
+    v10 = UnityEngine_Time__get_deltaTime(method: nullptr) * Speed; /*0x1802189bc*/
+    this->fields.CanFallSound = true; /*0x1802189c2*/
+    DurateCan = this->fields.DurateCan; /*0x1802189c9*/
+    this->fields.fallDuration = v10 + v8; /*0x1802189d5*/
+    this->fields.DurateCan = (float)(UnityEngine_Time__get_deltaTime(method: nullptr) * 4.0) + DurateCan; /*0x1802189ee*/
+    if ( this->fields.fallDuration > this->fields.FallMega && !this->fields.DeathFall && !this->fields.Damaged ) /*0x180218a1c*/
+    {
+LABEL_14:
+      this->fields.Damaged = true; /*0x180218a22*/
+      FallingHolder__HandleLanding(this, method: nullptr); /*0x180218a2e*/
+      *(_WORD *)&this->fields.CanFallSound = 0; /*0x180218a35*/
+      this->fields.DurateCan = 0.0; /*0x180218a3e*/
+      if ( UnityEngine_PlayerPrefs__GetInt_6449952640(key: StringLiteral_5260, method: nullptr) == 4 /*0x180218a68*/
+        || UnityEngine_PlayerPrefs__GetInt_6449952640(key: StringLiteral_5260, method: nullptr) == 5 )
+      {
+        Falling = (UnityEngine_AudioSource_o *)this->fields.Ray1; /*0x180218a6e*/
+        if ( Falling == nullptr ) /*0x180218a75*/
+          goto LABEL_49; /*0x180218a75*/
+        PickRay__CheckItemDropping(this: (PickRay_o *)Falling, method: nullptr); /*0x180218a7d*/
+        method = (const MethodInfo *)this->fields.CamPivot; /*0x180218a82*/
+        BloodSplashHead = (Il2CppObject *)this->fields.BloodSplashHead; /*0x180218a89*/
+        if ( method == nullptr ) /*0x180218a93*/
+          goto LABEL_49; /*0x180218a93*/
+        position = UnityEngine_Transform__get_position( /*0x180218aa1*/
+                     retstr: &v20,
+                     this: (UnityEngine_Transform_o *)method,
+                     method: nullptr);
+        z = position->fields.z; /*0x180218aad*/
+        v16 = *(_QWORD *)&position->fields.x; /*0x180218ab0*/
+        if ( byte_180CE4267 == 0 ) /*0x180218ab4*/
+        {
+          sub_180138640(a1: &UnityEngine_Quaternion_TypeInfo, a2: v14); /*0x180218abd*/
+          byte_180CE4267 = 1; /*0x180218ac2*/
+        }
+        v17 = *UnityEngine_Quaternion_TypeInfo->static_fields; /*0x180218ad7*/
+        if ( UnityEngine_Object_TypeInfo->_2.cctor_finished == 0 ) /*0x180218ae8*/
+          il2cpp_runtime_class_init(); /*0x180218aea*/
+        identityQuaternion = v17.identityQuaternion; /*0x180218b00*/
+        *(_QWORD *)&v20.fields.x = v16; /*0x180218b09*/
+        v20.fields.z = z; /*0x180218b0f*/
+        UnityEngine_Object__Instantiate_object__6445392960( /*0x180218b13*/
+          original: BloodSplashHead,
+          position: &v20,
+          rotation: &identityQuaternion,
+          method: (const MethodInfo_2CE440 *)Method_UnityEngine_Object_Instantiate_GameObject____6455276512);
+      }
+    }
+LABEL_43:
+    if ( !this->fields.isLanding ) /*0x180218c8d*/
+      return; /*0x180218c8d*/
+  }
+  UnityEngine_Component__GetComponent___Il2CppFullySharedGenericType_( /*0x180218c8f*/
+    retstr: (Unity_IL2CPP_Metadata___Il2CppFullySharedGenericType_o *)this,
+    this: &v22,
+    method: (const MethodInfo_2AC530 *)Method_UnityEngine_Component_GetComponent_CrouchHolder___);
+  if ( v22.klass == nullptr ) /*0x180218cab*/
+    goto LABEL_49; /*0x180218cab*/
+  if ( BYTE2(v22.klass->_1.fields) == 0 ) /*0x180218cb4*/
+    return; /*0x180218cb4*/
+  UnityEngine_Component__GetComponent___Il2CppFullySharedGenericType_( /*0x180218cc5*/
+    retstr: (Unity_IL2CPP_Metadata___Il2CppFullySharedGenericType_o *)this,
+    this: &v22,
+    method: (const MethodInfo_2AC530 *)Method_UnityEngine_Component_GetComponent_CrouchHolder___);
+  Falling = (UnityEngine_AudioSource_o *)v22.klass; /*0x180218cca*/
+  if ( v22.klass == nullptr ) /*0x180218cd2*/
+    goto LABEL_49; /*0x180218cd2*/
+  CrouchHolder__StopCrouch(this: (CrouchHolder_o *)v22.klass, method: nullptr); /*0x180218cd6*/
+}
