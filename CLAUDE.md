@@ -5,7 +5,10 @@
 > is archived at [docs/archive/CLAUDE.full.2026-09-15.md](docs/archive/CLAUDE.full.2026-09-15.md).
 > This file is a compact index — restore from the archive if deeper context is needed.
 >
-> See also: [docs/speed-timing.md](docs/speed-timing.md) (slow-motion nav / speed
+> See also: [docs/replay-sync.md](docs/replay-sync.md) (bit-exact replay: phase
+> alignment, exact clock, rig restore, ray pinning, the per-frame sync check —
+> supersedes the archive's "replay drift" notes),
+> [docs/speed-timing.md](docs/speed-timing.md) (slow-motion nav / speed
 > lock, supersedes older timing notes), [docs/code-review.md](docs/code-review.md)
 > (2026-09-11 review — current behavior, fixes, tests, unresolved determinism
 > limitations), [docs/game-analysis.md](docs/game-analysis.md) (game RE detail),
@@ -55,6 +58,14 @@ Full hazard table (deltaTime, Update/FixedUpdate split, RNG, physics substeps,
 unscaled time, per-tick input) and disassembly-verified findings are in the
 archive and [docs/ida-findings.md](docs/ida-findings.md).
 
+Two things pinning the deltas does not give you, both now handled (details in
+[docs/replay-sync.md](docs/replay-sync.md)): the engine timeScale is a power of
+two so `captureDeltaTime × timeScale` is exact in double as well as float, and a
+replay pre-rolls a frame or two of computed delta so the fixed-step phase
+(`time − fixedTime`) at frame 0 equals the recording's. The game runs with
+`autoSyncTransforms` **off**, so that phase also decides when moved colliders
+become visible to the pickup ray.
+
 ## Subsystems
 
 | File | Role |
@@ -69,6 +80,12 @@ archive and [docs/ida-findings.md](docs/ida-findings.md).
 | `src/MacroFile.cs` | Text macro format, load/save |
 | `src/MacroEngine.cs` | Record/playback state machine |
 | `src/WorldSnapshot.cs` | Captures/restores entity positions so a replay starts from the recorded world |
+| `src/PlayerRigSnapshot.cs` | Captures/restores the player's animation phase, local transforms, controller geometry and flags |
+| `src/FrameTrace.cs` | Per-frame world state (clock, RNG, camera, controller, enemies) plus rays/pickups, stored in v5 macros |
+| `src/SyncProbe.cs` / `src/RandomProbe.cs` | Read-only capture of a `FrameTrace` at a frame boundary; `Random.state` via its icall |
+| `src/SyncTracker.cs` | Attributes rays and pickups between frames to the macro frame they belong to |
+| `src/SyncReport.cs` | Compares replay against recording before any correction; writes `UserData/GrannyTAS/Reports/*.txt` |
+| `src/InteractionPin.cs` | Records `PickRay`/`DoorRay` pose + fall flags at cast time; pins them for that call on replay |
 | `src/PickupDiagnostics.cs` | Traces the item-pickup gate chain and ray (off by default) |
 | `src/ImGuiHost.cs` | Dear ImGui context + Unity GL renderer backend |
 | `src/TasWindow.cs` | The ImGui control panel |
@@ -83,18 +100,25 @@ F5/F6 tick rate · F7/F8 speed · F9 uncapped · F10 clear buffer · F11 record 
 F12 play. All rebindable in the panel's Keybinds section.
 
 Macros: plain text, one line per simulated frame, `.grannytas` extension,
-header carries `tickRate`/`physicsRate`/`rngSeed`/`seedManagerSeed`/`scene`.
-Recording works at any speed; playback is always 1x. Player position is
-recorded per frame and corrected on replay (`PinPlaybackPosition`) — see the
-archive's "Replay drift" section for why this was needed (a 3073-frame replay
-lost one pickup to sub-mm position drift at a grazing ray angle, despite
-input replay being exact).
+header carries `tickRate`/`physicsRate`/`rngSeed`/`seedManagerSeed`/`scene`
+plus the player rig (`rigValue`/`rigAnim`/`rigPose`). Recording works at any
+speed; playback is always 1x. v5 frames add a sync trace. On replay, state is
+measured before it is corrected: player position (`PinPlaybackPosition`),
+rigidbodies, and interaction rays (`PinInteractionRays`) are steered back only
+where their bits differ, and every replay ends with a sync verdict and report.
+See [docs/replay-sync.md](docs/replay-sync.md); the archive's "Replay drift"
+section has the original 3073-frame pickup investigation.
 
 ## Status
 
 Core pipeline (frame stepper, speed/tick/physics controls, virtual input,
 macro record/playback, world snapshot, ImGui panel, player gate, rebindable
 hotkeys, config persistence, replay drift correction) is implemented and was
-verified on a recorded run (1912 frames, 0.001mm drift). Remaining: ImGui
+verified on a recorded run (1912 frames, 0.001mm drift). 0.4.0 adds fixed-step
+phase alignment, an exact clock at every speed, player-rig restore, interaction
+ray pinning, scene-qualified rigidbody identities, and the per-frame sync check
+(217 regression checks, including a simulated 0.48x-record / 1x-replay with an
+identical FixedUpdate pattern). **Not yet verified in the game** — see the
+checklist in [docs/replay-sync.md](docs/replay-sync.md). Remaining: ImGui
 keyboard/text input (not currently needed). See the archive's Status checklist
 for full history.

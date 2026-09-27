@@ -79,6 +79,8 @@ namespace GrannyTAS
             else ImGui.TextColored(Good, "  RUNNING");
             if (time.TimingMismatch)
                 ImGui.TextColored(Hot, "clock mismatch detected; see the mod log");
+            else if (!time.DeltaExact)
+                ImGui.TextColored(Warn, "frame delta is close but not bit-exact; see the mod log");
 
             // Enemy ticks per player frame. The player advances in Update and the
             // AI in FixedUpdate, so this ratio is part of the simulation and must
@@ -182,6 +184,9 @@ namespace GrannyTAS
                     ImGui.TextColored(Warn, "PREPARING PLAYBACK");
                     ImGui.TextWrapped(macro.PendingStatus);
                     break;
+                case MacroMode.Aligning:
+                    ImGui.TextColored(Warn, "ALIGNING — moving the physics step onto the recording's");
+                    break;
                 default:
                     ImGui.Text(macro.FrameCount > 0
                         ? $"macro  {macro.FrameCount} frames ({macro.Macro.DurationSeconds:0.##}s at 1x)"
@@ -246,6 +251,46 @@ namespace GrannyTAS
 
             ImGui.TextColored(Dim, "records at any speed; always plays back at 1x");
             ImGui.TextWrapped("Replay restores positions and level setup; doors, AI timers, and other world state may differ.");
+
+            DrawSync(macro);
+        }
+
+        /// <summary>
+        /// Whether the replay is (or was) the recorded run, bit for bit — and if
+        /// not, the first frame and system where it stopped being. The full
+        /// per-area table is in the report file named underneath.
+        /// </summary>
+        private static void DrawSync(MacroEngine macro)
+        {
+            var live = macro.LiveReport;
+            var report = live ?? macro.LastReport;
+            if (report == null) return;
+
+            ImGui.Spacing();
+            ImGui.TextColored(Dim, live != null ? "sync check (live)" : "sync check (last replay)");
+            if (!report.TracesPresent)
+            {
+                ImGui.TextColored(Dim, "  macro predates sync traces; re-record for a full check");
+                return;
+            }
+
+            if (report.Exact)
+                ImGui.TextColored(Good, $"  bit-identical so far ({report.FramesReplayed} frames)");
+            else if (report.FirstDivergence(out var frame, out var area))
+            {
+                ImGui.TextColored(Hot, $"  diverged at frame {frame}: {SyncReport.NameOf(area)}");
+                ImGui.PushTextWrapPos(0f);
+                ImGui.TextColored(Dim, "  " + report[area].WorstNote);
+                ImGui.PopTextWrapPos();
+            }
+            else ImGui.TextColored(Hot, $"  {report.MissingRigidbodies} recorded rigidbody frame(s) missing");
+
+            var pins = report.RayPins + report.FlagPins;
+            if (pins > 0 || report.PositionCorrections > 0 || report.RigidbodyCorrections > 0)
+                ImGui.TextColored(Dim, $"  steered: {report.PositionCorrections} position, {report.RigidbodyCorrections} rigidbody, {pins} ray");
+
+            if (live == null && !string.IsNullOrEmpty(macro.LastReportPath))
+                ImGui.TextColored(Dim, "  report: " + Path.GetFileName(macro.LastReportPath));
         }
 
         /// <summary>
@@ -401,6 +446,14 @@ namespace GrannyTAS
                 VirtualInput.PinPosition = pin;
             }
             ImGui.TextColored(Dim, "  off: replays drift, and interactions miss");
+
+            var rays = cfg.PinInteractionRays;
+            if (ImGui.Checkbox("pin pickup/door rays on playback", ref rays))
+            {
+                cfg.PinInteractionRays = rays;
+                InteractionPin.Enabled = rays;
+            }
+            ImGui.TextColored(Dim, "  casts each ray from its recorded pose; the sync check counts every pin");
 
             var trace = cfg.PickupTrace;
             if (ImGui.Checkbox("log pickup gates", ref trace)) cfg.PickupTrace = trace;

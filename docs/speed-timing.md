@@ -15,10 +15,15 @@ the timing controller now uses:
 
 ```text
 fps cap = max(1, round(tick rate * requested speed))
-engine timescale = fps cap / tick rate
+engine timescale = fps cap / tick rate, rounded to the nearest power of two (0.4.0)
 capture delta = (1 / tick rate) / engine timescale
 physics delta = 1 / physics rate
 ```
+
+0.4.0: the power-of-two rounding makes `capture delta × timescale` exactly
+`1 / tick rate` in double precision too — with 29/60 at 0.48x only the float
+product was exact, so the engine's double clock drifted against a 1x replay.
+See [replay-sync.md](replay-sync.md).
 
 unity documents capture delta as scaled by timescale, so their product remains
 one simulated frame. [unity 2022.3 capture-time contract](https://docs.unity3d.com/2022.3/Documentation/ScriptReference/Time-captureDeltaTime.html).

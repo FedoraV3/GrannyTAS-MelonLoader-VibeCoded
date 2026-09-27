@@ -3,7 +3,9 @@
 A tool-assisted speedrun (TAS) toolkit for **Granny Legacy**, built as a [MelonLoader](https://melonwiki.xyz/) mod.
 
 Frame stepping, speed/tick/physics-rate controls, and deterministic macro record/playback
-(a macro recorded at 0.1x speed replays bit-identical at 1x). See [CLAUDE.md](CLAUDE.md) for
+(a macro recorded at 0.1x speed replays at 1x, and every replay ends with a per-frame sync
+report saying whether it was bit-identical — see [docs/replay-sync.md](docs/replay-sync.md)).
+See [CLAUDE.md](CLAUDE.md) for
 the full design writeup, and [docs/](docs/) for subsystem-level docs (timing, code review notes,
 IDA findings).
 

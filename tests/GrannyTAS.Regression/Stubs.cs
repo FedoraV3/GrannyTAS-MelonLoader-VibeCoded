@@ -31,6 +31,8 @@ namespace UnityEngine
     {
         public static float fixedDeltaTime = .02f, maximumDeltaTime = .33f,
             timeScale = 1f, captureDeltaTime, deltaTime = 1f / 60f, time, realtimeSinceStartup;
+        public static double timeAsDouble, fixedTimeAsDouble;
+        public static int frameCount;
     }
     public static class QualitySettings { public static int vSyncCount = 1; }
     public static class Application { public static int targetFrameRate = -1; public static string version = "test-build"; }
@@ -51,13 +53,44 @@ namespace UnityEngine
         public static float Round(float v) => MathF.Round(v);
         public static float Abs(float v) => MathF.Abs(v);
     }
+    public static class Physics
+    {
+        public static bool autoSyncTransforms;
+        public static int SyncCalls;
+        public static void SyncTransforms() => SyncCalls++;
+
+        /// <summary>Test hook: what a ray from an origin hits, or null for nothing.</summary>
+        public static Func<Vector3, string> HitAt = _ => null;
+
+        public static bool Raycast(Vector3 origin, Vector3 direction, out RaycastHit hit, float maxDistance)
+        {
+            var name = HitAt(origin);
+            hit = name == null ? default : new RaycastHit { collider = new Collider { gameObject = new GameObject(false) { name = name } } };
+            return name != null;
+        }
+    }
+    public struct RaycastHit { public Collider collider; }
+    public class Collider { public GameObject gameObject; }
     public class Object
     {
-        public static T FindObjectOfType<T>() where T : class => null;
+        public static bool DeferDestroy;
+        public static readonly List<GameObject> PendingDestroy = new();
+        public static T FindObjectOfType<T>() where T : class => FindObjectsOfType<T>().FirstOrDefault();
         public static T[] FindObjectsOfType<T>() => GameObject.All
             .Where(go => go.activeInHierarchy)
             .SelectMany(go => go.Components.Where(component => component.gameObject == go))
             .OfType<T>().ToArray();
+        public static void Destroy(Object target)
+        {
+            if (target is not GameObject go) return;
+            if (DeferDestroy) PendingDestroy.Add(go);
+            else go.activeInHierarchy = false;
+        }
+        public static void FlushDestroy()
+        {
+            foreach (var go in PendingDestroy) go.activeInHierarchy = false;
+            PendingDestroy.Clear();
+        }
     }
     public class Component : Object
     {
@@ -89,8 +122,23 @@ namespace UnityEngine
         }
         public GameObject gameObject;
         public Vector3 position;
-        public Quaternion rotation;
-        public Quaternion localRotation;
+        public Quaternion rotation = Quaternion.identity;
+        public Vector3 localPosition;
+        public Quaternion localRotation = Quaternion.identity;
+        public Vector3 localScale = new(1, 1, 1);
+        public Vector3 forward => Vector3.forward;
+        public int childCount => Children.Count;
+        public Transform GetChild(int index) => Children[index];
+        public int SetPoseCalls;
+        // No hierarchy maths: a pinned world pose shows up in the local fields
+        // too, which is what the pin's restore has to undo.
+        public void SetPositionAndRotation(Vector3 p, Quaternion q)
+        {
+            SetPoseCalls++;
+            position = p; rotation = q;
+            localPosition = new Vector3(p.x + 100, p.y, p.z);
+            localRotation = q;
+        }
         public int GetSiblingIndex() => parent != null
             ? parent.Children.IndexOf(this)
             : GameObject.Roots.IndexOf(gameObject);
@@ -100,6 +148,7 @@ namespace UnityEngine
         public float x, y, z;
         public Vector3(float x, float y, float z) { this.x = x; this.y = y; this.z = z; }
         public static Vector3 zero => new(0, 0, 0);
+        public static Vector3 forward => new(0, 0, 1);
         public static Vector3 operator -(Vector3 a, Vector3 b) => new(a.x - b.x, a.y - b.y, a.z - b.z);
         public float magnitude => MathF.Sqrt(x * x + y * y + z * z);
     }
@@ -137,6 +186,10 @@ namespace UnityEngine
         }
         public Transform transform;
         public bool activeInHierarchy = true;
+        public bool activeSelf = true;
+        public SceneManagement.Scene scene = SceneManagement.SceneManager.Active;
+        private string _name;
+        public string name { get => transform?.name ?? _name; set { if (transform != null) transform.name = value; else _name = value; } }
         internal void Attach(Component component)
         {
             if (!Components.Contains(component)) Components.Add(component);
@@ -150,12 +203,36 @@ namespace UnityEngine
             return component;
         }
         public T GetComponent<T>() where T : class => Components.OfType<T>().FirstOrDefault();
+        public T GetComponentInChildren<T>() where T : class => GetComponent<T>();
         public T[] GetComponents<T>() => Components.OfType<T>().ToArray();
+        public void SetActive(bool value) { activeSelf = value; activeInHierarchy = value; }
         public static GameObject Find(string path) => null;
     }
     public class Camera : Component { public bool isActiveAndEnabled = true; }
+    public class AnimationState
+    {
+        public string name = "";
+        public bool enabled;
+        public float weight, time, speed = 1f;
+    }
+    public class Animation : Component
+    {
+        public readonly List<AnimationState> States = new();
+        public int SampleCalls;
+        public int GetClipCount() => States.Count;
+        public AnimationState GetStateAtIndex(int index) => States[index];
+        public AnimationState this[string name] => States.FirstOrDefault(s => s.name == name);
+        public void Sample() => SampleCalls++;
+    }
     public class Animator : Component { }
-    public class CharacterController : Component { public bool enabled; }
+    public class CharacterController : Component
+    {
+        public bool enabled;
+        public bool isGrounded;
+        public Vector3 velocity;
+        public float height = 2f, radius = .5f;
+        public Vector3 center;
+    }
     [Flags]
     public enum RigidbodyConstraints
     {
@@ -184,6 +261,8 @@ namespace UnityEngine.AI
     public class NavMeshAgent : UnityEngine.Component
     {
         public bool enabled;
+        public bool isOnNavMesh = true;
+        public UnityEngine.Vector3 velocity;
         public bool Warp(UnityEngine.Vector3 p) => true;
         public void ResetPath() { }
     }
@@ -204,12 +283,24 @@ namespace Il2Cpp
     public class SeedManager { public int Seed; public bool RandomizeSeed; public void GeneratePlacement() { } }
     public class MobileFPS : UnityEngine.Component
     {
-        /// <summary>The controller the position pin has to disable to move the player.</summary>
-        public UnityEngine.CharacterController Controller = new() { enabled = true };
+        /// <summary>The player's controller, attached to its own GameObject like the real one.</summary>
+        public UnityEngine.CharacterController Controller;
+        public UnityEngine.CharacterController characterController => Controller;
         public T GetComponent<T>() where T : class => Controller as T;
+
+        public MobileFPS()
+        {
+            Controller = gameObject.AddComponent<UnityEngine.CharacterController>();
+            Controller.enabled = true;
+        }
 
         public float rotationX;
         public bool enabled = true, isAllowedToMove = true, AbleToMove = true, CamK = true;
+        public bool IsCrouched, isMoving, CanFade, InWeb, WasOnPlatform, RotateXReser;
+        public UnityEngine.Vector3 moveDirection;
+        public float moveSpeed;
+        public UnityEngine.Animation CameraAnim;
+        public FallingHolder FallingHolder;
         public UnityEngine.Transform playerCamera = new();
         public UnityEngine.Camera playerCamera2 = new();
         public PlayerStatus PS = new();
@@ -229,9 +320,60 @@ namespace Il2Cpp
     }
     public class PlayerStatus { public bool IsJumpscared, Killed; }
     public class Days { public UnityEngine.Animator PlayerBedAnim; }
-    public class FallingHolder { public void Update() { } }
-    public class PickRay { public void Update() { } }
-    public class DoorRay { public void Update() { } }
+    public class FallingHolder : UnityEngine.Component
+    {
+        public bool isFalling, isLanding, Fell, Damaged, DeathFall, CanFallSound, CanCamSmooth;
+        public float fallDuration, DurateCan;
+        public UnityEngine.Animation playerAnimation;
+        public void Update() { }
+    }
+    public class CrouchHolder : UnityEngine.Component
+    {
+        public bool On1, On2, isCrouching, IsCrouched, Starter, Disabled, IsBelow;
+        public UnityEngine.Animation Cam, Anim;
+    }
+    public class PickRay : UnityEngine.Component
+    {
+        public UnityEngine.GameObject Player;
+        public Inventory Inventory;
+        public UnityEngine.GameObject H_CR = new(), H_DSH = new(), H_FT = new(), H_PTRAP = new();
+        public UnityEngine.GameObject Drop1 = new(), ItemDrop = new(), ShotgunHandMain = new(),
+            ShotgunHandPipes = new(), O_FT = new(), O_PTRAP = new();
+        public UnityEngine.Transform DropP = new(), DropPFreezeTrap = new();
+        public float RaycastDis = 2f, RaycastCheckItemDis = 3f;
+        public int CheckDropCalls;
+        public void CheckItemDropping() { CheckDropCalls++; Inventory?.DropLogic(); }
+        public void Update() { }
+    }
+    public class ItemDefs
+    {
+        public string itemName;
+        public UnityEngine.GameObject handObject;
+    }
+    public class ItemSeedData : UnityEngine.Component { public string itemName; }
+    public class Inventory : UnityEngine.Component
+    {
+        public readonly List<ItemDefs> ItemDefs = new();
+        public int DropCalls, PickupCalls;
+        public ItemDefs GetItemDefByName(string name) => ItemDefs.FirstOrDefault(item => item.itemName == name);
+        public void DropLogic()
+        {
+            DropCalls++;
+            foreach (var item in ItemDefs) item.handObject?.SetActive(false);
+        }
+        public void PickupItem(string name)
+        {
+            PickupCalls++;
+            DropLogic();
+            GetItemDefByName(name)?.handObject?.SetActive(true);
+            GrannyTAS.SyncTracker.OnPickup(name);
+        }
+    }
+    public class DoorRay : UnityEngine.Component
+    {
+        public float RaycastDis = 2f;
+        public void Update() { }
+    }
     public class AI_Granny : UnityEngine.Component { public void StopChase() { } public void ResetAIDecision() { } }
     public class AI_Grandpa : AI_Granny { }
     public class AI_MomSpider : UnityEngine.Component { }
@@ -244,6 +386,9 @@ namespace HarmonyLib
 {
     [AttributeUsage(AttributeTargets.Class, AllowMultiple=true)]
     public class HarmonyPatch : Attribute { public HarmonyPatch(params object[] args) { } }
+    [AttributeUsage(AttributeTargets.Method | AttributeTargets.Class)]
+    public class HarmonyPriority : Attribute { public HarmonyPriority(int priority) { } }
+    public static class Priority { public const int Last = 0, Normal = 400, First = 800; }
     public static class AccessTools
     {
         public static System.Reflection.MethodInfo Method(Type t, string name) => t.GetMethod(name);
@@ -255,9 +400,10 @@ namespace MelonLoader
     {
         public class Instance
         {
-            public void Warning(string text) { }
-            public void Msg(string text) { }
-            public void Error(string text) { }
+            public readonly List<string> Lines = new();
+            public void Warning(string text) => Lines.Add("W " + text);
+            public void Msg(string text) => Lines.Add("M " + text);
+            public void Error(string text) => Lines.Add("E " + text);
         }
     }
     public class MelonPreferences_Entry<T>
@@ -301,11 +447,39 @@ namespace MelonLoader.Utils
 }
 namespace UnityEngine.SceneManagement
 {
-    public struct Scene { public string name; }
-    public static class SceneManager { public static Scene GetActiveScene() => new() { name = "test_scene" }; }
+    public struct Scene { public string name; public int handle; }
+    public static class SceneManager
+    {
+        public static readonly Scene Active = new() { name = "test_scene", handle = 1 };
+        public static readonly List<Scene> Loaded = new() { Active };
+        public static int sceneCount => Loaded.Count;
+        public static Scene GetSceneAt(int index) => Loaded[index];
+        public static Scene GetActiveScene() => Active;
+    }
 }
 namespace GrannyTAS
 {
+    public sealed class FakePickupRecovery : IPickupRecovery
+    {
+        public readonly HashSet<string> Known = new(StringComparer.Ordinal);
+        public readonly List<string> Calls = new();
+        public int Mutations;
+        public string Held = "";
+
+        public PickupRecoveryResult TryRecover(string itemName)
+        {
+            Calls.Add(itemName);
+            if (!Known.Contains(itemName)) return PickupRecoveryResult.Failed("unknown item");
+            if (Held == itemName) return PickupRecoveryResult.AlreadyHeld();
+            Mutations++;
+            Held = itemName;
+            // Models the Harmony prefix which a real forced PickupItem call
+            // passes through. SyncTracker must suppress this event.
+            SyncTracker.OnPickup(itemName);
+            return PickupRecoveryResult.Applied();
+        }
+    }
+
     public sealed class FakeMacroGameSetup : IMacroGameSetup
     {
         public bool RestartRequired, BuildMatches = true, LoadedMatches = true;

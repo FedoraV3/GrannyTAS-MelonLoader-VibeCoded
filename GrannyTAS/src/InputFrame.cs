@@ -40,6 +40,12 @@ namespace GrannyTAS
         public Vector3 PlayerPosition;
 
         /// <summary>
+        /// World state at this frame's boundary and the events after it, for the
+        /// replay sync check (v5 macros). Null when not recorded.
+        /// </summary>
+        public FrameTrace Trace;
+
+        /// <summary>
         /// Keyboard codes sampled every frame, excluding duplicate enum aliases
         /// and joystick codes. Game action rebinds must not disappear because
         /// their key was missing from a handwritten sampling list.
@@ -88,6 +94,7 @@ namespace GrannyTAS
             RotationX = 0f;
             HasPosition = false;
             PlayerPosition = Vector3.zero;
+            Trace = null;
             for (var i = 0; i < MouseButtons.Length; i++) MouseButtons[i] = false;
         }
 
@@ -111,6 +118,7 @@ namespace GrannyTAS
                 copy.CopyFrom(state);
                 PhysicsStates.Add(copy);
             }
+            Trace = other.Trace?.Clone();
         }
     }
 }

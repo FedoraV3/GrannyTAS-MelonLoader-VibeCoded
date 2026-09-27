@@ -107,7 +107,7 @@ namespace GrannyTAS
         /// Component types worth restoring. Everything that moves under its own
         /// power and can therefore invalidate a replay.
         /// </summary>
-        private static void ForEachTrackedEnemy(Action<Component> visit)
+        internal static void ForEachTrackedEnemy(Action<Component> visit)
         {
             Visit<AI_Granny>(visit);
             Visit<AI_Grandpa>(visit);
@@ -238,19 +238,11 @@ namespace GrannyTAS
         {
             // A CharacterController resolves collisions against the position it
             // already believes it has, so writing transform.position underneath
-            // it gets partly undone. Disabling it first makes the write stick.
-            CharacterController cc = null;
-            try { cc = go.GetComponent<CharacterController>(); } catch { }
-
-            var wasEnabled = false;
-            if (cc != null) { wasEnabled = cc.enabled; cc.enabled = false; }
-
-            try
-            {
-                go.transform.position = e.Position;
-                go.transform.rotation = e.Rotation;
-            }
-            finally { if (cc != null) cc.enabled = wasEnabled; }
+            // it gets partly undone. MoveCharacter makes the write stick without
+            // rebuilding the controller (which would throw away its grounded
+            // state — see VirtualInput.TeleportByToggle).
+            go.transform.rotation = e.Rotation;
+            VirtualInput.MoveCharacter(go, e.Position);
 
             try
             {
@@ -314,7 +306,7 @@ namespace GrannyTAS
         /// Full hierarchy path, since scenes routinely contain several objects
         /// sharing a name and a bare name would restore the wrong one.
         /// </summary>
-        private static string HierarchyPath(Transform t)
+        internal static string HierarchyPath(Transform t)
         {
             var sb = new StringBuilder(t.name);
             var p = t.parent;

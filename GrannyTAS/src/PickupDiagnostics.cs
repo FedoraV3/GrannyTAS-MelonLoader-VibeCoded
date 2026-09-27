@@ -43,6 +43,7 @@ namespace GrannyTAS
             {
                 case MacroMode.Recording: return "rec";
                 case MacroMode.Playing: return "play";
+                case MacroMode.Aligning: return "align";
                 default: return GrannyTasMod.Instance.Time.Paused ? "paused" : "live";
             }
         }
@@ -208,7 +209,13 @@ namespace GrannyTAS
         [HarmonyPatch(typeof(Inventory), nameof(Inventory.PickupItem))]
         internal static class Patch_Inventory_PickupItem
         {
-            private static void Prefix(string itemName) => OnPickupItem(itemName ?? "?");
+            private static void Prefix(string itemName)
+            {
+                // The sync check compares pickups frame by frame whether or not
+                // the trace is on — a missed item is the symptom it exists for.
+                SyncTracker.OnPickup(itemName ?? "?");
+                OnPickupItem(itemName ?? "?");
+            }
         }
     }
 }

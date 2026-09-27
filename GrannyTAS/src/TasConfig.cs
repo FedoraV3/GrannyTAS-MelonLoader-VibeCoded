@@ -35,6 +35,7 @@ namespace GrannyTAS
         private MelonPreferences_Entry<bool> _suppressLookWithPanel;
         private MelonPreferences_Entry<bool> _pickupTrace;
         private MelonPreferences_Entry<bool> _pinPlaybackPosition;
+        private MelonPreferences_Entry<bool> _pinInteractionRays;
         private MelonPreferences_Entry<float> _tickRate;
         private MelonPreferences_Entry<float> _physicsRate;
         private MelonPreferences_Entry<float> _speed;
@@ -70,6 +71,17 @@ namespace GrannyTAS
         {
             get => _pinPlaybackPosition.Value;
             set { if (_pinPlaybackPosition.Value != value) { _pinPlaybackPosition.Value = value; MarkDirty(); } }
+        }
+
+        /// <summary>
+        /// On playback, cast the pickup and door rays from exactly where they
+        /// were cast when recording, with the recorded fall flags — see
+        /// <see cref="InteractionPin"/>. Every pin is counted in the sync report.
+        /// </summary>
+        public bool PinInteractionRays
+        {
+            get => _pinInteractionRays.Value;
+            set { if (_pinInteractionRays.Value != value) { _pinInteractionRays.Value = value; MarkDirty(); } }
         }
 
         /// <summary>
@@ -134,6 +146,8 @@ namespace GrannyTAS
                 description: "Log the item-pickup gate chain around each interact press. Diagnostic; noisy.");
             _pinPlaybackPosition = _cat.CreateEntry("PinPlaybackPosition", true,
                 description: "On playback, put the player back on the recorded position each frame so interaction rays stay on target.");
+            _pinInteractionRays = _cat.CreateEntry("PinInteractionRays", true,
+                description: "On playback, cast pickup/door rays from exactly where they were cast when recording (measured either way).");
 
             _tickRate = _cat.CreateEntry("TickRate", 60f,
                 description: "Simulated frames per second. Part of the run: changing it changes the simulation.");
@@ -223,6 +237,7 @@ namespace GrannyTAS
             _suppressLookWithPanel.ResetToDefault();
             _pickupTrace.ResetToDefault();
             _pinPlaybackPosition.ResetToDefault();
+            _pinInteractionRays.ResetToDefault();
             _tickRate.ResetToDefault();
             _physicsRate.ResetToDefault();
             _speed.ResetToDefault();

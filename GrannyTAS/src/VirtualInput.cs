@@ -85,16 +85,32 @@ namespace GrannyTAS
         /// <summary>Largest correction applied since the last reset, in metres.</summary>
         public static float MaxPositionDrift { get; private set; }
 
-        /// <summary>Frame-relative count of corrections that exceeded the deadband.</summary>
+        /// <summary>Frames on which the position differed from the recording (bit for bit) and was corrected.</summary>
         public static int PositionCorrections { get; private set; }
 
         /// <summary>
-        /// Below this, leave the position alone. Rewriting a
-        /// <c>CharacterController</c>'s position every frame for a difference
-        /// smaller than the collision skin buys nothing and risks disturbing
-        /// the very resolution it is meant to preserve.
+        /// Whether corrections have fallen back to disabling the
+        /// <c>CharacterController</c> around the write.
+        ///
+        /// The default correction writes the transform and calls
+        /// <c>Physics.SyncTransforms</c>, which moves the controller's capsule
+        /// without destroying it. Disabling and re-enabling it instead rebuilds
+        /// the capsule and throws away its collision state — including the
+        /// grounded flag that <c>FallingHolder</c> turns into <c>isFalling</c>,
+        /// which is one of the gates <c>PickRay</c> refuses a pickup on. So the
+        /// correction that was meant to save a pickup could itself cost one.
+        ///
+        /// The toggle is kept as a fallback: if a correction does not stick
+        /// (three consecutive frames need one), the game evidently ignores the
+        /// sync for its controller, and every later correction uses the toggle.
         /// </summary>
-        private const float PositionDeadband = 1e-6f;
+        public static bool TeleportByToggle { get; private set; }
+
+        /// <summary>Raised once when <see cref="TeleportByToggle"/> engages.</summary>
+        public static System.Action TeleportFallbackEngaged;
+
+        private const int CorrectionsBeforeFallback = 3;
+        private static int _consecutiveCorrections;
 
         /// <summary>What the game currently sees.</summary>
         public static readonly InputFrame Current = new InputFrame();
@@ -259,7 +275,7 @@ namespace GrannyTAS
             Current.CopyFrom(source);
             ForRecord.CopyFrom(source);
             _restoreCurrentPoseInPlayerUpdate = Current.HasPose;
-            ApplyPose(Current);
+            ApplyPose(Current, atIssue: true);
         }
 
         /// <summary>
@@ -356,45 +372,81 @@ namespace GrannyTAS
             frame.HasPosition = true;
         }
 
-        /// <summary>Restore a recorded pose immediately at the frame issuance boundary.</summary>
-        public static void ApplyPose(InputFrame frame)
+        /// <summary>
+        /// Restore a recorded pose immediately at the frame issuance boundary.
+        /// Each value is written only when it differs from the live one: a replay
+        /// that is already on the recording is left bit-for-bit untouched, since
+        /// even an "identical" quaternion write can renormalise in the last bit.
+        /// </summary>
+        public static void ApplyPose(InputFrame frame) => ApplyPose(frame, atIssue: false);
+
+        private static void ApplyPose(InputFrame frame, bool atIssue)
         {
             var player = PlayerGate.Player;
             if (frame == null || !frame.HasPose || player == null || player.playerCamera == null) return;
-            player.transform.rotation = frame.PlayerRotation;
-            player.playerCamera.localRotation = frame.CameraLocalRotation;
-            player.rotationX = frame.RotationX;
-            ApplyPosition(player, frame);
+            if (!Bits.Same(player.transform.rotation, frame.PlayerRotation)) player.transform.rotation = frame.PlayerRotation;
+            if (!Bits.Same(player.playerCamera.localRotation, frame.CameraLocalRotation))
+                player.playerCamera.localRotation = frame.CameraLocalRotation;
+            if (!Bits.Same(player.rotationX, frame.RotationX)) player.rotationX = frame.RotationX;
+            ApplyPosition(player, frame, atIssue);
         }
 
         /// <summary>
         /// Move the player back onto the recorded position, measuring the drift
         /// on the way. Measurement happens whether or not the correction is
         /// enabled: knowing how far a replay wandered is worth having even when
-        /// the run is left to wander.
+        /// the run is left to wander. Any difference counts — a determinism
+        /// check that tolerates a micrometre cannot tell a sub-micrometre drift
+        /// from an identical replay, and the drift compounds either way.
         /// </summary>
-        private static void ApplyPosition(MobileFPS player, InputFrame frame)
+        private static void ApplyPosition(MobileFPS player, InputFrame frame, bool atIssue)
         {
             if (!frame.HasPosition) return;
 
             var transform = player.transform;
-            var drift = (transform.position - frame.PlayerPosition).magnitude;
+            var current = transform.position;
+            if (Bits.Same(current, frame.PlayerPosition))
+            {
+                if (atIssue) _consecutiveCorrections = 0;
+                return;
+            }
+
+            var drift = Bits.Distance(current, frame.PlayerPosition);
             if (!float.IsFinite(drift)) return;
             if (drift > MaxPositionDrift) MaxPositionDrift = drift;
-            if (!PinPosition || drift <= PositionDeadband) return;
+            if (!PinPosition) return;
 
             PositionCorrections++;
+            if (atIssue && !TeleportByToggle && ++_consecutiveCorrections >= CorrectionsBeforeFallback)
+            {
+                TeleportByToggle = true;
+                TeleportFallbackEngaged?.Invoke();
+            }
+            MoveCharacter(player.gameObject, frame.PlayerPosition);
+        }
 
-            // A CharacterController resolves collisions against the position it
-            // already believes it has, so a write underneath it is partly
-            // undone. Disabling it first makes the write stick — the same
-            // mechanic WorldSnapshot.RestorePlayer relies on.
+        /// <summary>
+        /// Put a CharacterController-driven object at <paramref name="position"/>
+        /// so the controller agrees — see <see cref="TeleportByToggle"/> for why
+        /// this syncs rather than disabling the controller, unless it has had to
+        /// fall back.
+        /// </summary>
+        internal static void MoveCharacter(GameObject go, Vector3 position)
+        {
+            var transform = go.transform;
+            if (!TeleportByToggle)
+            {
+                transform.position = position;
+                try { Physics.SyncTransforms(); } catch { }
+                return;
+            }
+
             CharacterController cc = null;
-            try { cc = player.GetComponent<CharacterController>(); } catch { }
+            try { cc = go.GetComponent<CharacterController>(); } catch { }
 
             var wasEnabled = false;
             if (cc != null) { wasEnabled = cc.enabled; cc.enabled = false; }
-            try { transform.position = frame.PlayerPosition; }
+            try { transform.position = position; }
             finally { if (cc != null) cc.enabled = wasEnabled; }
         }
 
@@ -403,13 +455,21 @@ namespace GrannyTAS
         {
             MaxPositionDrift = 0f;
             PositionCorrections = 0;
+            _consecutiveCorrections = 0;
+        }
+
+        /// <summary>Forget a teleport fallback, as a fresh session would.</summary>
+        internal static void ResetTeleportMode()
+        {
+            TeleportByToggle = false;
+            _consecutiveCorrections = 0;
         }
 
         internal static void ApplyCurrentPose(MobileFPS player)
         {
             if (!Active || Frozen || Time.deltaTime <= 0f || !_restoreCurrentPoseInPlayerUpdate ||
                 player == null || player != PlayerGate.Player || !Current.HasPose || player.playerCamera == null) return;
-            ApplyPose(Current);
+            ApplyPose(Current, atIssue: false);
             _restoreCurrentPoseInPlayerUpdate = false;
         }
 

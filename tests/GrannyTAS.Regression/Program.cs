@@ -25,10 +25,10 @@ void SetGatePlayer(Il2Cpp.MobileFPS player)
 
 // The full readiness gate starts and stops the TAS, while an already-running
 // macro may bridge only the four control signals used by scripted transitions.
-var gatePlayer = new Il2Cpp.MobileFPS();
 PlayerGate.Invalidate();
 Check(!PlayerGate.IsReady && !PlayerGate.CanBridgeTransientControlLoss,
     "missing player remains a hard gate failure");
+var gatePlayer = new Il2Cpp.MobileFPS();
 SetGatePlayer(gatePlayer);
 for (var i = 0; i < 12; i++) PlayerGate.IsReady.ToString();
 Check(PlayerGate.IsReady, "player gate settles before initial engagement");
@@ -203,26 +203,46 @@ Check(Same(capturedA.Position.x, rigidA.position.x) && SameQuaternion(capturedA.
     "rigidbody checkpoint captures pose, motion, flags, constraints, and sleep state");
 
 PhysicsFrameState.ResetDrift();
+Check(PhysicsFrameState.TryApply(new[] { capturedA }, out _) && PhysicsFrameState.CorrectionCount == 0 &&
+      PhysicsFrameState.LastDiffering == 0,
+    "a rigidbody already matching its checkpoint bit for bit is left untouched");
 var recordedPosition = capturedA.Position;
 rigidA.position = new Vector3(recordedPosition.x + .5e-6f, recordedPosition.y, recordedPosition.z);
-Check(PhysicsFrameState.TryApply(new[] { capturedA }, out _) && PhysicsFrameState.CorrectionCount == 0 &&
-      !Same(rigidA.position.x, recordedPosition.x),
-    "rigidbody drift at or below one micrometre remains inside the correction threshold");
+Check(PhysicsFrameState.TryApply(new[] { capturedA }, out _) && PhysicsFrameState.CorrectionCount == 1 &&
+      PhysicsFrameState.LastDiffering == 1 && Same(rigidA.position.x, recordedPosition.x),
+    "sub-micrometre rigidbody drift is measured and corrected to the exact bits");
 rigidA.position = new Vector3(recordedPosition.x + 2e-6f, recordedPosition.y, recordedPosition.z);
 rigidA.velocity = Vector3.zero;
-Check(PhysicsFrameState.TryApply(new[] { capturedA }, out _) && PhysicsFrameState.CorrectionCount == 1 &&
+Check(PhysicsFrameState.TryApply(new[] { capturedA }, out _) && PhysicsFrameState.CorrectionCount == 2 &&
       Same(rigidA.position.x, recordedPosition.x) && Same(rigidA.velocity.x, capturedA.Velocity.x) &&
       PhysicsFrameState.MaxPositionDrift > 1e-6f,
-    "dynamic rigidbody state is restored exactly above the one-micrometre threshold");
+    "dynamic rigidbody state is restored exactly");
+rigidA.WakeUp();
+Check(PhysicsFrameState.TryApply(new[] { capturedA }, out _) && rigidA.IsSleeping() && PhysicsFrameState.CorrectionCount == 3,
+    "sleep state is restored after the corrective writes");
 var kinematic = new PhysicsFrameState();
 kinematic.CopyFrom(capturedA);
 kinematic.IsKinematic = true;
 rigidA.velocity = new Vector3(99, 98, 97);
 Check(PhysicsFrameState.TryApply(new[] { kinematic }, out _) && Same(rigidA.velocity.x, 99),
     "kinematic checkpoint application avoids invalid velocity writes");
-Check(!PhysicsFrameState.TryApply(new[] { new PhysicsFrameState { Identity = "missing#0" } }, out var missingBody) &&
-      missingBody.Contains("missing rigidbody"),
-    "missing expected rigidbody is reported as a strict desync");
+var sceneSeparator = capturedA.Identity.IndexOf(':');
+Check(capturedA.Identity.StartsWith("test_scene:", StringComparison.Ordinal) && sceneSeparator > 0,
+    "rigidbody identities are qualified by their scene, so two loaded scenes cannot collide");
+var legacyState = new PhysicsFrameState();
+legacyState.CopyFrom(capturedA);
+legacyState.Identity = capturedA.Identity.Substring(sceneSeparator + 1);
+rigidA.position = new Vector3(recordedPosition.x + 1f, recordedPosition.y, recordedPosition.z);
+Check(PhysicsFrameState.TryApply(new[] { legacyState }, out _) && PhysicsFrameState.LastMissing == 0 &&
+      Same(rigidA.position.x, recordedPosition.x) && !rigidA.isKinematic,
+    "v4 scene-less rigidbody identities still resolve");
+Check(PhysicsFrameState.TryApply(new[] { new PhysicsFrameState { Identity = "test_scene:missing#0", Rotation = Quaternion.identity }, capturedA },
+          out var missingError) && missingError == null && PhysicsFrameState.LastMissing == 1 &&
+      PhysicsFrameState.LastFirstMissing == "test_scene:missing#0",
+    "a missing recorded rigidbody is counted without abandoning the rest of the checkpoint");
+Check(!PhysicsFrameState.TryApply(new[] { new PhysicsFrameState { Identity = "" } }, out var invalidCheckpoint) &&
+      invalidCheckpoint.Contains("invalid"),
+    "a malformed rigidbody checkpoint is still refused");
 
 var previewPlayer = new Il2Cpp.MobileFPS();
 SetGatePlayer(previewPlayer);
@@ -288,10 +308,13 @@ VirtualInput.ResetDrift();
 VirtualInput.PinPosition = true;
 previewPlayer.transform.position = new Vector3(1f, 2f, 3.25f);
 previewPlayer.Controller.enabled = true;
+var syncsBefore = Physics.SyncCalls;
 VirtualInput.AdvanceFrom(drifted);
 Check(Same(previewPlayer.transform.position.z, 3f) && previewPlayer.Controller.enabled &&
       Same(VirtualInput.MaxPositionDrift, 0.25f) && VirtualInput.PositionCorrections == 1,
     "playback puts the player back on the recorded position and reports the drift");
+Check(Physics.SyncCalls == syncsBefore + 1 && !VirtualInput.TeleportByToggle,
+    "position correction syncs the controller instead of rebuilding it (keeps its grounded state)");
 
 previewPlayer.transform.position = new Vector3(1f, 2f, 3f);
 VirtualInput.AdvanceFrom(drifted);
@@ -316,6 +339,20 @@ previewPlayer.transform.position = new Vector3(9f, 9f, 9f);
 VirtualInput.AdvanceFrom(poseWithoutPosition);
 Check(Same(previewPlayer.transform.position.x, 9f) && Same(VirtualInput.MaxPositionDrift, 0f),
     "a macro without recorded positions replays untouched");
+VirtualInput.ResetDrift();
+VirtualInput.ResetTeleportMode();
+var fallbackEvents = 0;
+VirtualInput.TeleportFallbackEngaged = () => fallbackEvents++;
+for (var i = 0; i < 4; i++)
+{
+    previewPlayer.transform.position = new Vector3(1f, 2f, 9f);
+    VirtualInput.AdvanceFrom(drifted);
+}
+Check(VirtualInput.TeleportByToggle && fallbackEvents == 1 && Same(previewPlayer.transform.position.z, 3f) &&
+      previewPlayer.Controller.enabled && VirtualInput.PositionCorrections == 4,
+    "corrections that do not stick fall back to the controller toggle, once");
+VirtualInput.ResetTeleportMode();
+VirtualInput.TeleportFallbackEngaged = null;
 SetGatePlayer(null);
 Input.Axes.Clear();
 Input.RawAxes.Clear();
@@ -440,7 +477,12 @@ try
     frame.HasPosition = true;
     frame.HasPhysicsState = true;
     frame.PhysicsStates.Add(capturedA);
+    frame.Trace = new FrameTrace { HasClock = true, Dt = 1f / 60f, Elapsed = 1.0 / 3.0, Phase = 0.0123456789012345, FixedSteps = 2 };
+    frame.Trace.Pickups.Add("Hammer");
     macro.Frames.Add(frame);
+    macro.Rig.Values.Add(new KeyValuePair<string, float[]>("fps.IsCrouched", new[] { 1f }));
+    macro.Rig.Animations.Add(new PlayerRigSnapshot.AnimState { Owner = "fps.CameraAnim", Name = "walk|bob", Enabled = true, Weight = .5f, Time = .123456791f, Speed = 1f });
+    macro.Rig.Transforms.Add(new PlayerRigSnapshot.LocalPose { Path = "0/2", Name = "Main Camera", Position = new Vector3(0, 1.6f, 0), Rotation = Quaternion.identity, Scale = new Vector3(1, 1, 1) });
     macro.Snapshot.Entities.Add(new EntitySnapshot {
         Path = "/player", IsPlayer = true, RotationX = .123456791f,
         Position = new Vector3(.123456791f, -0.00000012345679f, float.Epsilon),
@@ -470,7 +512,16 @@ try
           loadedBody.IsKinematic == capturedA.IsKinematic && loadedBody.UseGravity == capturedA.UseGravity &&
           loadedBody.DetectCollisions == capturedA.DetectCollisions && loadedBody.Constraints == capturedA.Constraints &&
           loadedBody.Sleeping == capturedA.Sleeping,
-        "v4 rigidbody checkpoint round-trips bit for bit");
+        "rigidbody checkpoint round-trips bit for bit");
+    var loadedTrace = loaded.Frames[0].Trace;
+    Check(loaded.HasTraces && loadedTrace.HasClock && Bits.Same(loadedTrace.Phase, frame.Trace.Phase) &&
+          Bits.Same(loadedTrace.Elapsed, frame.Trace.Elapsed) && loadedTrace.FixedSteps == 2 &&
+          loadedTrace.Pickups.SequenceEqual(new[] { "Hammer" }),
+        "v5 sync trace round-trips bit for bit");
+    Check(loaded.Rig.Values.Count == 1 && loaded.Rig.Animations.Single().Name == "walk|bob" &&
+          Same(loaded.Rig.Animations[0].Time, .123456791f) && loaded.Rig.Transforms.Single().Name == "Main Camera" &&
+          Same(loaded.Rig.Transforms[0].Position.y, 1.6f),
+        "player rig header round-trips, including names containing separators");
     Check(Same(macro.Snapshot.Entities[0].Position.y, loaded.Snapshot.Entities[0].Position.y) &&
           Same(macro.Snapshot.Entities[0].RotationX, loaded.Snapshot.Entities[0].RotationX) &&
           loaded.Snapshot.Entities[0].HasCameraRotation &&
@@ -487,7 +538,8 @@ try
     Reject(() => macro.Save(path), "v4 save rejects non-finite rigidbody state");
     frame.PhysicsStates[0].Position = finitePosition;
     foreach (var (bad, name) in new[] {
-        (valid.Replace("macro v4", "macro v99"), "unknown version rejected"),
+        (valid.Replace("macro v5", "macro v99"), "unknown version rejected"),
+        (valid.Replace("|t:", "|t:x"), "malformed trace rejected"),
         (valid.Replace("tickRate=60", "tickRate=NaN"), "NaN rate rejected"),
         (valid.Replace("tickRate=60", "tickRate=0"), "zero rate rejected"),
         (valid.Replace("frames=1", "frames=2"), "truncated recording detected"),
@@ -568,9 +620,12 @@ var desyncFrame = new InputFrame { HasPhysicsState = true };
 desyncFrame.PhysicsStates.Add(new PhysicsFrameState { Identity = "absent/rigidbody#0", Rotation = Quaternion.identity });
 desyncEngine.Macro.Frames.Add(desyncFrame);
 desyncEngine.StartPlayback();
-Check(!desyncEngine.TryDrivePlayback() && desyncEngine.Mode == MacroMode.Idle && desyncEngine.Playhead == 0 &&
-      desyncEngine.PendingStatus.Contains("physics desync") && !desyncTime.SimulationRatesLocked,
-    "missing playback rigidbody aborts explicitly before issuing frame input");
+Check(desyncEngine.TryDrivePlayback() && desyncEngine.Mode == MacroMode.Playing && desyncEngine.Playhead == 1,
+    "a missing playback rigidbody no longer aborts the replay");
+desyncEngine.StopPlayback();
+Check(desyncEngine.LastReport != null && desyncEngine.LastReport.MissingRigidbodies == 1 &&
+      !desyncEngine.LastReport.Exact && !desyncTime.SimulationRatesLocked,
+    "the missing rigidbody is carried by the sync report instead");
 desyncTime.Disable();
 time.SetSpeed(.25f);
 engine.StartRecording();
@@ -714,12 +769,16 @@ Check(timedOut.Mode == MacroMode.Idle && timedOut.Playhead == 0 && !timeoutTime.
 
 time.SetTickRate(165);
 var physicsBeforeSpeed = Time.fixedDeltaTime;
-foreach (var speed in new[] { .01f, .1f, .25f, .56f, 1f, 4f })
+foreach (var speed in new[] { .01f, .1f, .15f, .23f, .25f, .3f, .37f, .45f, .48f, .56f, 1f, 1.5f, 4f })
 {
     time.SetSpeed(speed);
-    var expectedScale = time.EffectiveFpsCap / time.TickRate;
-    Check(Same(Time.timeScale, expectedScale) && MathF.Abs(Time.captureDeltaTime * Time.timeScale - 1f / 165f) < 1e-8f
-        && Same(Time.fixedDeltaTime, physicsBeforeSpeed), $"{speed}x aligns engine clock while preserving frame/physics deltas");
+    var capped = time.EffectiveFpsCap / time.TickRate;
+    var powerOfTwo = Time.timeScale > 0 && (BitConverter.SingleToInt32Bits(Time.timeScale) & 0x7FFFFF) == 0;
+    Check(powerOfTwo && Time.timeScale <= capped * 1.4143f && Time.timeScale >= capped / 1.4143f &&
+          Same(Time.captureDeltaTime * Time.timeScale, 1f / 165f) &&
+          (double)Time.captureDeltaTime * Time.timeScale == (double)(1f / 165f) &&
+          Same(Time.fixedDeltaTime, physicsBeforeSpeed),
+        $"{speed}x engine clock is a power of two and the frame delta is exact in float and double");
 }
 time.SetSpeed(.1f);
 time.SetPaused(true);
@@ -735,7 +794,7 @@ Check(Time.timeScale == 0 && Time.captureDeltaTime == 0, "single step returns to
 time.SetPaused(false);
 Time.deltaTime = Time.captureDeltaTime * Time.timeScale;
 time.OnUpdate(); time.OnUpdate(); time.OnUpdate();
-Check(!time.TimingMismatch, "compensated clock passes observed-delta check");
+Check(!time.TimingMismatch && time.DeltaExact, "compensated clock passes the observed-delta check bit for bit");
 
 var frameBeforeGamePause = time.FrameCount;
 time.SetPaused(true);
@@ -786,4 +845,490 @@ time.OnUpdate();
 Check(time.TimingMismatch, "incorrect engine delta raises runtime timing diagnostic");
 time.Disable();
 Check(!time.TimingMismatch, "disengaging clears timing diagnostic");
+
+// ---- sync traces ---------------------------------------------------------------
+// The replay check is only as good as the round trip of what it compares.
+var fullTrace = new FrameTrace
+{
+    HasClock = true, Dt = 1f / 60f, Elapsed = 0.016666667535901070, Phase = 0.012345678901234567, FixedSteps = 1,
+    HasCamera = true, CameraPosition = new Vector3(1.1f, 2.2f, 3.3f), CameraRotation = new Quaternion(.1f, .2f, .3f, .9f),
+    HasController = true, Grounded = true, ControllerVelocity = new Vector3(0, -9.81f, 0.0001f), ControllerHeight = 1.9f,
+    HasFall = true, Falling = false, Landing = true, FallDuration = .5f,
+    HasRng = true, Rng0 = -5, Rng1 = int.MaxValue, Rng2 = int.MinValue, Rng3 = 7,
+};
+fullTrace.Enemies.Add(new EnemySample
+{
+    Path = "/Granny|odd,name;x", Position = new Vector3(4, 5, 6), Rotation = new Quaternion(0, .7071068f, 0, .7071068f),
+    HasAgent = true, AgentVelocity = new Vector3(.5f, 0, -.25f),
+});
+fullTrace.Enemies.Add(new EnemySample { Path = "/Grandpa", Position = new Vector3(7, 8, 9), Rotation = Quaternion.identity });
+fullTrace.Rays.Add(new RaySample
+{
+    Kind = RaySample.Door, Order = 1, Position = new Vector3(.123456791f, 1.6f, -2), Rotation = new Quaternion(0, 0, .3826834f, .9238795f),
+    HasFall = true, Falling = true, Landing = true, Hit = "Door;Front,1",
+});
+fullTrace.Rays.Add(new RaySample { Kind = RaySample.Pick, Position = Vector3.zero, Rotation = Quaternion.identity, Hit = "" });
+fullTrace.Pickups.Add("Hammer");
+fullTrace.Pickups.Add("Key, spare");
+var decodedTrace = FrameTrace.Decode(fullTrace.Encode());
+Check(decodedTrace.Encode() == fullTrace.Encode() && Bits.Same(decodedTrace.Phase, fullTrace.Phase) &&
+      Bits.Same(decodedTrace.Elapsed, fullTrace.Elapsed) && decodedTrace.Rng2 == int.MinValue &&
+      decodedTrace.Enemies[0].Path == "/Granny|odd,name;x" && decodedTrace.Enemies[0].HasAgent && !decodedTrace.Enemies[1].HasAgent &&
+      decodedTrace.Rays[0].Hit == "Door;Front,1" && decodedTrace.Rays[0].Falling && decodedTrace.Rays[0].Landing &&
+      !decodedTrace.Rays[1].HasFall && decodedTrace.Pickups[1] == "Key, spare",
+    "frame trace round-trips bit for bit, including names containing separators");
+var clonedTrace = fullTrace.Clone();
+clonedTrace.Rays[0].Hit = "changed";
+clonedTrace.Pickups.Clear();
+Check(fullTrace.Rays[0].Hit == "Door;Front,1" && fullTrace.Pickups.Count == 2, "trace clones own their lists");
+Check(FrameTrace.Decode("-") == null, "absent trace decodes to null");
+Reject(() => FrameTrace.Decode("t:1,2,3"), "short trace group rejected");
+Reject(() => FrameTrace.Decode("t:NaN,0,0,0"), "non-finite trace value rejected");
+Reject(() => FrameTrace.Decode("r:5,0,0,0,0,0,0,0,1,-1,"), "invalid ray kind rejected");
+Check(FrameTrace.Decode("z:from,a,newer,build;p:" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("Key"))).Pickups.Single() == "Key",
+    "unknown trace groups are skipped so newer macros still load");
+
+// ---- sync report ------------------------------------------------------------------
+var verdict = new SyncReport { TracesPresent = true, FramesReplayed = 10 };
+var boundary = new InputFrame { Trace = new FrameTrace { HasClock = true, Dt = 1f / 60f, Phase = .01, Elapsed = 1.0 / 60, FixedSteps = 1 } };
+var sameClock = new FrameTrace { HasClock = true, Dt = 1f / 60f, Phase = .01 + 5e-14, Elapsed = 1.0 / 60 - 5e-14, FixedSteps = 1 };
+verdict.CompareBoundary(3, boundary, sameClock, new InputFrame());
+Check(verdict.Exact && verdict[SyncReport.Area.Clock].Compared == 1 && verdict.Summary().Contains("BIT-IDENTICAL"),
+    "clock differences at double-rounding scale are not divergences");
+var skippedStep = new FrameTrace { HasClock = true, Dt = 1f / 60f, Phase = .01, Elapsed = 1.0 / 60, FixedSteps = 0 };
+verdict.CompareBoundary(4, boundary, skippedStep, new InputFrame());
+Check(!verdict.Exact && verdict.FirstDivergence(out var firstFrame, out var firstArea) && firstFrame == 4 &&
+      firstArea == SyncReport.Area.FixedSteps && verdict.Summary().Contains("frame 4"),
+    "a FixedUpdate landing on another frame is reported with its frame and area");
+Check(verdict.Lines().Any(l => l.StartsWith("fixed-step pattern", StringComparison.Ordinal) && l.Contains("  1  ")) &&
+      verdict.Lines().Any(l => l.Contains("f4 fixed-step pattern")),
+    "the report file lists the area table and the first differences");
+var legacyVerdict = new SyncReport { TracesPresent = false, FramesReplayed = 5 };
+Check(legacyVerdict.Summary().Contains("predates"), "a macro without traces says it could not be checked");
+
+// ---- event attribution ------------------------------------------------------------------
+var t0 = new FrameTrace();
+var t1 = new FrameTrace();
+SyncTracker.BeginRecording();
+SyncTracker.OnPickup("before any frame");
+SyncTracker.RecordIssued(0, t0);
+SyncTracker.OnPickup("Hammer");
+SyncTracker.RecordIssued(1, t1);
+SyncTracker.Stop();
+Check(t0.Pickups.SequenceEqual(new[] { "Hammer" }) && t1.Pickups.Count == 0,
+    "pickups belong to the most recently issued macro frame");
+var pickupReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(pickupReport);
+SyncTracker.ReplayIssued(0, t0);
+SyncTracker.ReplayIssued(1, t1);
+SyncTracker.OnPickup("Hammer");
+SyncTracker.Stop();
+Check(pickupReport[SyncReport.Area.Pickups].Differing == 1 && pickupReport[SyncReport.Area.Pickups].FirstFrame == 0,
+    "a missed pickup is reported on the frame it was recorded, and the final frame's window is not compared");
+
+var recovery = new FakePickupRecovery();
+recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
+var recoveryReport = new SyncReport { TracesPresent = true };
+var pliersTrace = new FrameTrace();
+pliersTrace.Pickups.Add("Pliers");
+SyncTracker.BeginReplay(recoveryReport, recovery);
+SyncTracker.ReplayIssued(0, pliersTrace);
+SyncTracker.OnPickup("Pliers");
+recovery.Held = "Pliers";
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(recovery.Calls.Count == 0 && recoveryReport.PickupRecoveries == 0,
+    "a natural recorded pickup is never duplicated by recovery");
+SyncTracker.Stop();
+
+recovery = new FakePickupRecovery();
+recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
+recoveryReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(recoveryReport, recovery);
+SyncTracker.ReplayIssued(0, pliersTrace);
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(recovery.Calls.SequenceEqual(new[] { "Pliers" }) && recovery.Held == "Pliers" &&
+      recoveryReport.PickupRecoveries == 1 && recoveryReport[SyncReport.Area.Pickups].Differing == 1,
+    "a missed pliers pickup is reported before it is forced into the hand");
+SyncTracker.OnPickup("Pliers");
+SyncTracker.ReplayIssued(2, new FrameTrace());
+Check(recovery.Calls.Count == 1,
+    "a forced pickup is not attributed to the next replay frame");
+SyncTracker.Stop();
+
+var twoPickups = new FrameTrace();
+twoPickups.Pickups.Add("Hammer");
+twoPickups.Pickups.Add("Pliers");
+recovery = new FakePickupRecovery();
+recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
+recoveryReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(recoveryReport, recovery);
+SyncTracker.ReplayIssued(0, twoPickups);
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(recovery.Calls.SequenceEqual(new[] { "Hammer", "Pliers" }) && recovery.Held == "Pliers" &&
+      recoveryReport.PickupRecoveries == 2,
+    "multiple missed pickups are recovered once in recorded order");
+SyncTracker.Stop();
+
+recovery = new FakePickupRecovery { Held = "Hammer" };
+recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
+recoveryReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(recoveryReport, recovery);
+SyncTracker.ReplayIssued(0, pliersTrace);
+SyncTracker.OnPickup("Hammer");
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(recovery.Calls.SequenceEqual(new[] { "Pliers" }) && recovery.Held == "Pliers",
+    "a wrong natural pickup is replaced by the recorded item");
+SyncTracker.Stop();
+
+recovery = new FakePickupRecovery { Held = "Hammer" };
+recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
+recoveryReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(recoveryReport, recovery);
+SyncTracker.ReplayIssued(0, twoPickups);
+SyncTracker.OnPickup("Pliers");
+recovery.Held = "Pliers";
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(recovery.Calls.Count == 0 && recovery.Held == "Pliers" && recoveryReport.PickupRecoverySkipped == 1,
+    "an earlier miss is skipped when a later recorded item was already picked naturally");
+SyncTracker.Stop();
+
+recovery = new FakePickupRecovery { Held = "Hammer" };
+recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
+recoveryReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(recoveryReport, recovery);
+SyncTracker.ReplayIssued(0, twoPickups);
+SyncTracker.OnPickup("Pliers");
+SyncTracker.OnPickup("Hammer");
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(recovery.Calls.SequenceEqual(new[] { "Pliers" }) && recovery.Held == "Pliers",
+    "reverse natural pickup order is repaired to the recorded terminal held item");
+SyncTracker.Stop();
+
+var unknownTrace = new FrameTrace();
+unknownTrace.Pickups.Add("Unknown item");
+unknownTrace.Pickups.Add("Pliers");
+recovery = new FakePickupRecovery();
+recovery.Known.Add("Pliers");
+recoveryReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(recoveryReport, recovery);
+SyncTracker.ReplayIssued(0, unknownTrace);
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(recovery.Calls.SequenceEqual(new[] { "Unknown item" }) && recovery.Mutations == 0 &&
+      recoveryReport.PickupRecoveryFailures == 1 && recoveryReport.PickupRecoverySkipped == 1,
+    "an unknown item fails before mutation and stops the frame recovery transaction");
+SyncTracker.Stop();
+
+recovery = new FakePickupRecovery();
+recovery.Known.Add("Pliers");
+recoveryReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(recoveryReport, recovery);
+SyncTracker.ReplayIssued(7, pliersTrace);
+SyncTracker.CompleteReplay();
+Check(recovery.Calls.SequenceEqual(new[] { "Pliers" }) && recoveryReport[SyncReport.Area.Pickups].FirstFrame == 7,
+    "natural replay completion compares and recovers the final frame pickup window");
+SyncTracker.Stop();
+
+recovery = new FakePickupRecovery();
+recovery.Known.Add("Pliers");
+SyncTracker.BeginReplay(new SyncReport { TracesPresent = true }, recovery);
+SyncTracker.ReplayIssued(0, pliersTrace);
+SyncTracker.Stop();
+Check(recovery.Calls.Count == 0, "manual stop resets a partial pickup window without forcing it");
+SyncTracker.BeginReplay(new SyncReport { TracesPresent = false }, recovery);
+SyncTracker.ReplayIssued(0, pliersTrace);
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(recovery.Calls.Count == 0, "legacy macros without traces never run pickup recovery");
+SyncTracker.Stop();
+Check(recoveryReport.Lines().Any(line => line.Contains("missed pickups")),
+    "the sync report lists pickup recovery outcomes");
+
+// ---- native generic pickup recovery boundary --------------------------------------
+var inventoryObject = new GameObject();
+var liveInventory = inventoryObject.AddComponent<Il2Cpp.Inventory>();
+var handObject = new GameObject();
+handObject.SetActive(false);
+liveInventory.ItemDefs.Add(new Il2Cpp.ItemDefs { itemName = "Pliers", handObject = handObject });
+var livePickRay = new GameObject().AddComponent<Il2Cpp.PickRay>();
+livePickRay.Inventory = liveInventory;
+var sourceObject = new GameObject();
+sourceObject.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
+var nativeRecovery = new GamePickupRecovery();
+var nativeResult = nativeRecovery.TryRecover("Pliers");
+Check(nativeResult.Outcome == PickupRecoveryOutcome.Applied && handObject.activeSelf &&
+      !sourceObject.activeInHierarchy && livePickRay.CheckDropCalls == 1 && liveInventory.PickupCalls == 1,
+    "generic recovery follows CheckItemDropping, PickupItem, then source destruction");
+var dropsBeforeUnknown = liveInventory.DropCalls;
+Check(nativeRecovery.TryRecover("Unknown").Outcome == PickupRecoveryOutcome.Failed &&
+      liveInventory.DropCalls == dropsBeforeUnknown,
+    "unknown item recovery fails before destructive native calls");
+
+handObject.SetActive(false);
+var duplicateSourceA = new GameObject();
+duplicateSourceA.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
+var duplicateSourceB = new GameObject();
+duplicateSourceB.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
+var pickupsBeforeAmbiguous = liveInventory.PickupCalls;
+Check(nativeRecovery.TryRecover("Pliers").Outcome == PickupRecoveryOutcome.Failed &&
+      liveInventory.PickupCalls == pickupsBeforeAmbiguous && duplicateSourceA.activeInHierarchy && duplicateSourceB.activeInHierarchy,
+    "ambiguous world sources fail without inventory or source mutation");
+duplicateSourceA.SetActive(false);
+duplicateSourceB.SetActive(false);
+
+handObject.SetActive(true);
+var heldSource = new GameObject();
+heldSource.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
+var pickupsBeforeHeld = liveInventory.PickupCalls;
+Check(nativeRecovery.TryRecover("Pliers").Outcome == PickupRecoveryOutcome.AlreadyHeld &&
+      liveInventory.PickupCalls == pickupsBeforeHeld && heldSource.activeInHierarchy,
+    "already-held recovery is a true no-op and does not guess which world source to destroy");
+Check(nativeRecovery.TryRecover("b").Outcome == PickupRecoveryOutcome.Failed &&
+      liveInventory.PickupCalls == pickupsBeforeHeld,
+    "the unmodeled special shotgun branch is rejected before native calls");
+heldSource.SetActive(false);
+
+handObject.SetActive(false);
+Check(nativeRecovery.TryRecover("Pliers").Outcome == PickupRecoveryOutcome.Applied &&
+      handObject.activeSelf,
+    "a missing world source still allows the recorded item into the hand");
+
+handObject.SetActive(false);
+UnityEngine.Object.DeferDestroy = true;
+var deferredSource = new GameObject();
+deferredSource.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
+Check(nativeRecovery.TryRecover("Pliers").Outcome == PickupRecoveryOutcome.Applied &&
+      deferredSource.activeInHierarchy,
+    "source destruction can be deferred by the engine");
+handObject.SetActive(false);
+var replacementSource = new GameObject();
+replacementSource.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
+Check(nativeRecovery.TryRecover("Pliers").Outcome == PickupRecoveryOutcome.Applied &&
+      UnityEngine.Object.PendingDestroy.Contains(replacementSource),
+    "a consumed source is ignored until deferred destruction completes");
+UnityEngine.Object.FlushDestroy();
+UnityEngine.Object.DeferDestroy = false;
+handObject.SetActive(false);
+
+// ---- interaction ray pin ------------------------------------------------------------------
+var rayPlayer = new Il2Cpp.MobileFPS();
+var rayFall = rayPlayer.gameObject.AddComponent<Il2Cpp.FallingHolder>();
+rayPlayer.FallingHolder = rayFall;
+var pick = new Il2Cpp.PickRay { Player = rayPlayer.gameObject };
+pick.transform.position = new Vector3(1f, 1.6f, 1f);
+pick.transform.localPosition = new Vector3(0, .6f, 0);
+Physics.HitAt = origin => Same(origin.x, 1f) ? "Apple" : "Drawer";
+VirtualInput.Active = true;
+Time.deltaTime = 1f / 60f;
+var rayTrace = new FrameTrace();
+SyncTracker.BeginRecording();
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick));
+InteractionPin.After();
+Check(rayTrace.Rays.Count == 0, "no ray is recorded before the first macro frame exists");
+SyncTracker.RecordIssued(0, rayTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick));
+InteractionPin.After();
+SyncTracker.Stop();
+Check(rayTrace.Rays.Count == 1 && rayTrace.Rays[0].Hit == "Apple" && Same(rayTrace.Rays[0].Position.x, 1f) &&
+      rayTrace.Rays[0].HasFall && !rayTrace.Rays[0].Falling && rayTrace.Rays[0].Order == 0,
+    "recording stores the ray as cast, what it hit, and the fall flags");
+
+var rayReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(rayReport);
+SyncTracker.ReplayIssued(0, rayTrace);
+pick.transform.position = new Vector3(1.0005f, 1.6f, 1f);
+var localBeforePin = pick.transform.localPosition;
+rayFall.isFalling = true;
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick));
+var castFrom = pick.transform.position;
+var fallingDuringCast = rayFall.isFalling;
+InteractionPin.After();
+Check(Same(castFrom.x, 1f) && !fallingDuringCast && rayReport.RayPins == 1 && rayReport.FlagPins == 1,
+    "replay casts the pickup ray from the recorded pose with the recorded fall flags");
+Check(Bits.Same(pick.transform.localPosition, localBeforePin) && rayFall.isFalling,
+    "the pin is undone after the call, so nothing but the raycast sees it");
+Check(rayReport[SyncReport.Area.RayPose].Differing == 1 && rayReport[SyncReport.Area.RayHit].Differing == 1 &&
+      rayReport[SyncReport.Area.EffectiveRayHit].Differing == 0 && rayReport[SyncReport.Area.ScriptOrder].Differing == 0,
+    "the report shows the natural divergence and that the pinned cast hit the recorded target");
+SyncTracker.ReplayIssued(1, rayTrace);
+pick.transform.position = new Vector3(1f, 1.6f, 1f);
+pick.transform.rotation = Quaternion.identity;
+rayFall.isFalling = false;
+var setPosesBefore = pick.transform.SetPoseCalls;
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick));
+InteractionPin.After();
+Check(pick.transform.SetPoseCalls == setPosesBefore && rayReport.RayPins == 1 && rayReport.FlagPins == 1,
+    "a ray already on the recorded pose is not touched");
+var door = new Il2Cpp.DoorRay();
+InteractionPin.Before(RaySample.Door, door, null, InteractionPin.DoorDistance(door));
+InteractionPin.After();
+Check(rayReport.UnmatchedRays == 1, "a cast with no recorded counterpart is counted, not pinned");
+SyncTracker.Stop();
+Time.deltaTime = 0;
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick));
+InteractionPin.After();
+Check(pick.transform.SetPoseCalls == setPosesBefore, "frozen frames never pin");
+Physics.HitAt = _ => null;
+VirtualInput.Active = false;
+
+// ---- player rig ----------------------------------------------------------------------------
+var rigPlayer = new Il2Cpp.MobileFPS();
+var rigFall = rigPlayer.gameObject.AddComponent<Il2Cpp.FallingHolder>();
+rigPlayer.FallingHolder = rigFall;
+var rigCrouch = rigPlayer.gameObject.AddComponent<Il2Cpp.CrouchHolder>();
+var bob = new Animation();
+bob.States.Add(new AnimationState { name = "walk", enabled = true, weight = .75f, time = 1.2345f, speed = 1 });
+bob.States.Add(new AnimationState { name = "idle", enabled = false, weight = .25f, time = .5f, speed = 1 });
+rigPlayer.CameraAnim = bob;
+var rigChild = new GameObject();
+rigChild.transform.name = "Cam";
+rigChild.transform.parent = rigPlayer.transform;
+rigChild.transform.localPosition = new Vector3(0, 1.6f, .1f);
+rigPlayer.IsCrouched = true;
+rigFall.fallDuration = .125f;
+rigPlayer.Controller.height = 1.1f;
+rigPlayer.Controller.center = new Vector3(0, .55f, 0);
+rigCrouch.IsCrouched = true;
+var rig = PlayerRigSnapshot.Capture(rigPlayer);
+var rigCopy = new PlayerRigSnapshot();
+foreach (var line in rig.Encode())
+{
+    var eq = line.IndexOf('=');
+    rigCopy.AddDecoded(line.Substring(0, eq), line.Substring(eq + 1));
+}
+bob.States[0].time = 9f;
+bob.States[0].weight = 0f;
+bob.States[1].enabled = true;
+rigPlayer.IsCrouched = false;
+rigFall.fallDuration = 0f;
+rigPlayer.Controller.height = 2f;
+rigPlayer.Controller.center = Vector3.zero;
+rigChild.transform.localPosition = Vector3.zero;
+rigCrouch.IsCrouched = false;
+var rigNote = rigCopy.Restore(rigPlayer);
+Check(Same(bob.States[0].time, 1.2345f) && Same(bob.States[0].weight, .75f) && !bob.States[1].enabled && bob.SampleCalls == 1 &&
+      rigPlayer.IsCrouched && Same(rigFall.fallDuration, .125f) && Same(rigPlayer.Controller.height, 1.1f) &&
+      Same(rigPlayer.Controller.center.y, .55f) && Same(rigChild.transform.localPosition.y, 1.6f) && rigCrouch.IsCrouched &&
+      rigNote.Contains("2 animation states"),
+    "player rig restores head-bob phase, local transforms, controller geometry and movement flags");
+rigChild.transform.name = "Renamed";
+rigChild.transform.localPosition = Vector3.zero;
+rigCopy.Restore(rigPlayer);
+Check(Same(rigChild.transform.localPosition.y, 0f), "a rig transform that is no longer the same object is left alone");
+
+// ---- phase alignment ------------------------------------------------------------------------
+// A minimal Unity clock: the frame delta is captureDeltaTime * timeScale, the
+// double clock advances by the unrounded product (the stricter of the ways an
+// engine could accumulate it), and FixedUpdate runs whenever the fixed clock
+// is a whole step behind.
+int EngineFrame()
+{
+    Time.frameCount++;
+    var real = 1f / 60f;
+    Time.deltaTime = Time.captureDeltaTime > 0f ? Time.captureDeltaTime * Time.timeScale : real * Time.timeScale;
+    Time.timeAsDouble += Time.captureDeltaTime > 0f ? (double)Time.captureDeltaTime * Time.timeScale : (double)real * Time.timeScale;
+    var steps = 0;
+    while (Time.fixedTimeAsDouble + Time.fixedDeltaTime <= Time.timeAsDouble)
+    {
+        Time.fixedTimeAsDouble += Time.fixedDeltaTime;
+        steps++;
+    }
+    return steps;
+}
+
+// The mod's per-frame order (GrannyTasMod.OnUpdate / OnLateUpdate), minus hardware.
+bool ModFrame(MacroEngine e, TimeController t)
+{
+    EngineFrame();
+    var simulating = t.OnUpdate();
+    if (e.Mode == MacroMode.Aligning) e.UpdateAligning(simulating);
+    if (e.Mode == MacroMode.Aligning)
+    {
+        VirtualInput.Freeze();
+        t.OnLateUpdate();
+        return false;
+    }
+    if (simulating)
+    {
+        if (!e.TryDrivePlayback()) VirtualInput.AdvanceFromHardware();
+        e.CaptureFrame();
+    }
+    else VirtualInput.Freeze();
+    t.OnLateUpdate();
+    return simulating;
+}
+
+var clockTime = new TimeController();
+Time.timeScale = 1;
+Time.captureDeltaTime = 0;
+Time.fixedDeltaTime = .02f;
+Time.timeAsDouble = 812.3456789;
+Time.fixedTimeAsDouble = 812.34;
+clockTime.Enable();
+clockTime.SetTickRate(60);
+clockTime.SetSpeed(.48f);
+Check(clockTime.PhysicsRate == 50 && Same(Time.timeScale, .5f), "0.48x records under an exact half-speed engine clock");
+
+clockTime.BeginAlignment();
+Time.deltaTime = 1f / 60f;
+Check(!clockTime.OnUpdate() && clockTime.FrameCount == 0, "pre-roll frames never count as macro frames");
+clockTime.SetAlignmentDelta(.0123f);
+Check(Same(Time.captureDeltaTime, .0123f) && Time.timeScale == 1, "pre-roll runs unscaled with exactly the requested delta");
+clockTime.EndAlignment();
+Check(Same(Time.timeScale, .5f) && !clockTime.Aligning, "ending pre-roll restores the running clock");
+
+var e2e = new MacroEngine(new MelonLogger.Instance(), clockTime);
+for (var i = 0; i < 3; i++) ModFrame(e2e, clockTime);
+e2e.StartRecording();
+var recordedFrames = 0;
+for (var i = 0; i < 240; i++)
+{
+    if (i == 90) clockTime.SetPaused(true);
+    if (i == 110) clockTime.StepFrames(7);
+    if (i == 140) clockTime.SetPaused(false);
+    if (ModFrame(e2e, clockTime)) recordedFrames++;
+}
+e2e.StopRecording();
+// The stubs cannot resolve the scene hierarchy faithfully; keep this timing
+// test focused on clock alignment rather than snapshot lookup.
+e2e.Macro.HasSetupMetadata = false;
+e2e.Macro.Snapshot.Entities.Clear();
+Check(e2e.FrameCount == recordedFrames && e2e.Macro.HasTraces && e2e.Macro.Frames[0].Trace.FixedSteps == -1 &&
+      e2e.Macro.Frames.Skip(1).All(f => f.Trace.HasClock && f.Trace.FixedSteps >= 0),
+    "recording captures a clock trace for every macro frame, across pause and frame steps");
+
+// Replay from a different point in the fixed step, as a real replay would be.
+Time.timeAsDouble += 7.777777;
+while (Time.fixedTimeAsDouble + Time.fixedDeltaTime <= Time.timeAsDouble) Time.fixedTimeAsDouble += Time.fixedDeltaTime;
+e2e.StartPlayback();
+Check(e2e.Mode == MacroMode.Aligning && clockTime.Aligning, "a traced macro starts with fixed-step pre-roll");
+var preRoll = 0;
+while (e2e.Mode == MacroMode.Aligning && preRoll < 20)
+{
+    ModFrame(e2e, clockTime);
+    preRoll++;
+}
+Check(e2e.Mode == MacroMode.Playing && e2e.Playhead == 1 && preRoll <= 4 && Same(Time.timeScale, 1f),
+    $"pre-roll finishes in {preRoll} engine frames and frame 0 issues on the frame after (mode={e2e.Mode}, playhead={e2e.Playhead}, status={e2e.PendingStatus})");
+for (var i = 0; i < 400 && e2e.Mode == MacroMode.Playing; i++) ModFrame(e2e, clockTime);
+var e2eReport = e2e.LastReport;
+Check(e2eReport != null && e2eReport.FramesReplayed == recordedFrames &&
+      e2eReport[SyncReport.Area.FixedSteps].Compared == recordedFrames - 1 &&
+      e2eReport[SyncReport.Area.FixedSteps].Differing == 0 && e2eReport[SyncReport.Area.Clock].Differing == 0 &&
+      e2eReport.StartPhaseError < 1e-10 && e2eReport.Exact,
+    "a 0.48x recording with pauses replays at 1x with the identical FixedUpdate pattern on every frame");
+
+// Negative control: the same replay started out of phase must be caught.
+// Put frame 1 half a fixed step away from where the recording had it.
+e2e.Macro.Frames[0].Trace.HasClock = false;
+var recordedPhase1 = e2e.Macro.Frames[1].Trace.Phase;
+Time.fixedTimeAsDouble = Time.timeAsDouble - (((recordedPhase1 + .01 - 2.0 / 60.0) % .02 + .02) % .02);
+e2e.StartPlayback();
+Check(e2e.Mode == MacroMode.Playing, "a macro without a frame-0 clock skips pre-roll");
+for (var i = 0; i < 400 && e2e.Mode == MacroMode.Playing; i++) ModFrame(e2e, clockTime);
+Check(e2e.LastReport[SyncReport.Area.FixedSteps].Differing > 0 && !e2e.LastReport.Exact,
+    "an unaligned replay is caught by the fixed-step comparison");
+e2e.DiscardRecording();
+clockTime.Disable();
+if (Directory.Exists(MelonLoader.Utils.MelonEnvironment.UserDataDirectory))
+    Directory.Delete(MelonLoader.Utils.MelonEnvironment.UserDataDirectory, true);
+
 Console.WriteLine($"{passed} regression checks passed");

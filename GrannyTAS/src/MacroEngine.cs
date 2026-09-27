@@ -8,7 +8,12 @@ using UnityEngine.SceneManagement;
 
 namespace GrannyTAS
 {
-    public enum MacroMode { Idle, Recording, Preparing, Playing }
+    /// <summary>
+    /// <c>Aligning</c> is the short pre-roll between pressing play and the first
+    /// replayed frame, in which the engine's fixed-step phase is moved onto the
+    /// recording's (see <see cref="MacroEngine.UpdateAligning"/>).
+    /// </summary>
+    public enum MacroMode { Idle, Recording, Preparing, Aligning, Playing }
 
     public interface IMacroGameSetup
     {
@@ -32,13 +37,20 @@ namespace GrannyTAS
     /// Records one input per simulated frame and replays at 1x. Simulation rates,
     /// speed, and turbo are locked for the duration of either operation. The
     /// timing controller compensates capture time to retain the frame delta at
-    /// different speeds; native movement equivalence still needs verification.
+    /// different speeds, bit for bit.
+    ///
+    /// Every recorded frame also carries a <see cref="FrameTrace"/> of the world
+    /// at its boundary. On replay the same trace is captured before anything is
+    /// corrected and compared, so the end of a replay can say whether it was the
+    /// same run — or which frame and which system it stopped being the same on.
+    /// See <see cref="SyncReport"/> and docs/replay-sync.md.
     /// </summary>
     public sealed class MacroEngine
     {
         private readonly MelonLogger.Instance _log;
         private readonly TimeController _time;
         private readonly IMacroGameSetup _setup;
+        private readonly IPickupRecovery _pickupRecovery;
 
         private MacroFile _macro = new MacroFile();
         private int _playhead;
@@ -52,10 +64,32 @@ namespace GrannyTAS
         private float _speedBeforePlayback = 1f;
         private bool _uncappedBeforePlayback;
 
+        private bool _playbackPacingSaved;
+
         // Warn once per session rather than once per playback — the limitation
         // does not change between attempts, and re-saying it every replay
         // would just be noise.
         private bool _warnedSetupUnverified;
+
+        // ---- fixed-step phase alignment (Aligning) ----
+        // The phase each replayed frame starts at must equal the recording's,
+        // or FixedUpdate — the AI, rigidbody physics, and with
+        // autoSyncTransforms off, the moment moved colliders become visible to
+        // raycasts — lands on different frames. See UpdateAligning.
+        private const double AlignTolerance = 5e-11;
+        private const double CoarseHopThreshold = 2e-4;
+        private const double FineHopMargin = 1e-5;
+        private const int MaxAlignAttempts = 12;
+        private double _alignTarget;
+        private double _alignFrame0Phase;
+        private bool _alignReady;
+        private int _alignReadyFrame;
+        private int _alignAttempts;
+        private double _alignLastTime;
+        private double _startPhaseError = double.NaN;
+
+        private SyncReport _report;
+        private readonly InputFrame _poseScratch = new InputFrame();
 
         public MacroMode Mode { get; private set; } = MacroMode.Idle;
         public int Playhead => _playhead;
@@ -64,6 +98,15 @@ namespace GrannyTAS
         public string PendingStatus { get; private set; } = "";
         public float PeakRigidbodyPositionDrift => PhysicsFrameState.MaxPositionDrift;
         public int RigidbodyCorrections => PhysicsFrameState.CorrectionCount;
+
+        /// <summary>The report being filled by the replay in progress, or null.</summary>
+        public SyncReport LiveReport => Mode == MacroMode.Playing ? _report : null;
+
+        /// <summary>The report of the most recent finished replay, or null.</summary>
+        public SyncReport LastReport { get; private set; }
+
+        /// <summary>Where <see cref="LastReport"/> was written, or null if it could not be.</summary>
+        public string LastReportPath { get; private set; }
 
         /// <summary>
         /// True from the moment a recording stops until it is explicitly saved
@@ -93,11 +136,13 @@ namespace GrannyTAS
         /// </summary>
         public IReadOnlyList<SavedMacroInfo> SavedMacros { get; private set; } = Array.Empty<SavedMacroInfo>();
 
-        public MacroEngine(MelonLogger.Instance log, TimeController time, IMacroGameSetup setup = null)
+        public MacroEngine(MelonLogger.Instance log, TimeController time, IMacroGameSetup setup = null,
+            IPickupRecovery pickupRecovery = null)
         {
             _log = log;
             _time = time;
             _setup = setup ?? new MacroGameSetup();
+            _pickupRecovery = pickupRecovery ?? new GamePickupRecovery();
             RefreshSavedList();
         }
 
@@ -139,6 +184,9 @@ namespace GrannyTAS
                 // Capture where everyone stands now, so playback can put the
                 // world back before replaying a single input.
                 Snapshot = WorldSnapshot.Capture(),
+                // And what state the player's rig is in — the head-bob phase
+                // above all, which decides where the pickup ray starts.
+                Rig = PlayerRigSnapshot.Capture(PlayerGate.Player),
             };
             _setup.Capture(_macro);
 
@@ -159,11 +207,14 @@ namespace GrannyTAS
             // The macro is indexed by frame number, so the frame counter is
             // only meaningful while it agrees with the index being written.
             _time.ResetFrameCount();
+            SyncProbe.Begin();
+            SyncTracker.BeginRecording();
             Mode = MacroMode.Recording;
             _time.SimulationRatesLocked = true;
 
             _log.Msg($"Recording — {_macro.TickRate:0.#}/s sim, {_macro.PhysicsRate:0.#} Hz physics, rng {_macro.RngSeed}, " +
-                     $"{_macro.Snapshot.Entities.Count} entities snapshotted.");
+                     $"{_macro.Snapshot.Entities.Count} entities snapshotted, player rig " +
+                     $"{_macro.Rig.Animations.Count} animation states / {_macro.Rig.Transforms.Count} transforms.");
         }
 
         public void StopRecording()
@@ -171,6 +222,8 @@ namespace GrannyTAS
             if (Mode != MacroMode.Recording) return;
             Mode = MacroMode.Idle;
             _time.SimulationRatesLocked = false;
+            SyncTracker.Stop();
+            SyncProbe.End();
 
             HasUnsavedRecording = true;
             PendingStatus = "Recording stopped. Name it to save, or discard it.";
@@ -285,7 +338,7 @@ namespace GrannyTAS
                 return;
             }
 
-            StartPlaybackNow();
+            BeginPlayback();
         }
 
         private void BeginPreparing(string reason)
@@ -337,10 +390,16 @@ namespace GrannyTAS
                 CancelPreparing("Reloaded setup does not match the macro: " + reason);
                 return;
             }
-            StartPlaybackNow();
+            BeginPlayback();
         }
 
-        private void StartPlaybackNow()
+        /// <summary>
+        /// Everything a replay changes before its first frame: timing into the
+        /// macro's rates at 1x, unpaused, locked. Separated from
+        /// <see cref="StartPlaybackNow"/> because the fixed step has to be at the
+        /// macro's rate before the phase can be aligned to it.
+        /// </summary>
+        private void BeginPlayback()
         {
             // The item seed is the only piece of level setup actually checked
             // right now — difficulty, selectable version and item preset are
@@ -353,7 +412,6 @@ namespace GrannyTAS
                               "(accessors not yet implemented) — match them by hand. Only the item seed is checked.");
             }
 
-            var wasPreparing = Mode == MacroMode.Preparing;
             if (!_time.Enabled) _time.Enable();
 
             // Preparing locks every user-facing setter. Temporarily release the
@@ -364,6 +422,136 @@ namespace GrannyTAS
             _time.SetTickRate(_macro.TickRate);
             _time.SetPhysicsRate(_macro.PhysicsRate);
 
+            // Save the pacing the player had chosen so StopPlayback can restore
+            // it — forcing 1x here is a property of the replay, not something
+            // that should overwrite (and, via TasConfig.Sync, persist) as their
+            // new preferred speed.
+            if (!_playbackPacingSaved)
+            {
+                _speedBeforePlayback = _time.Speed;
+                _uncappedBeforePlayback = _time.Uncapped;
+                _playbackPacingSaved = true;
+            }
+            _time.SetSpeed(1f);
+            _time.SetPaused(false);
+            _time.SimulationRatesLocked = true;
+
+            var first = _macro.Frames[0].Trace;
+            if (first != null && first.HasClock && _time.FixedStep > 0)
+            {
+                BeginAligning(first);
+                return;
+            }
+
+            _startPhaseError = double.NaN;
+            StartPlaybackNow();
+        }
+
+        private void BeginAligning(FrameTrace first)
+        {
+            var wasPreparing = Mode == MacroMode.Preparing;
+            Mode = MacroMode.Aligning;
+            if (wasPreparing) _sawSceneLoaded = false;
+
+            // Frame 0 will run with the replay's delta; the frame before it must
+            // leave the phase exactly one such delta short of the recording's.
+            var replayDelta = 1f / _time.TickRate;
+            if (!Bits.Same(first.Dt, replayDelta))
+                _log.Warning($"Frame 0 was recorded with a {first.Dt:R}s delta but replays with {replayDelta:R}s " +
+                             "(recorded by an older build with an inexact clock); the fixed-step pattern may drift.");
+
+            _alignFrame0Phase = first.Phase;
+            _alignTarget = Wrap(first.Phase - replayDelta, _time.FixedStep);
+            _alignReady = false;
+            _alignAttempts = 0;
+            _alignLastTime = double.NaN;
+            _alignReadyFrame = int.MinValue;
+            _startPhaseError = double.NaN;
+            _time.BeginAlignment();
+            PendingStatus = "aligning the fixed-step phase";
+        }
+
+        /// <summary>
+        /// Pre-roll, called once per engine frame while <see cref="MacroMode.Aligning"/>.
+        ///
+        /// Unity runs FixedUpdate whenever the fixed clock falls a whole step
+        /// behind the frame clock, so with both deltas pinned, *which* frames get
+        /// a FixedUpdate is decided entirely by how far into a fixed step the
+        /// run starts — <c>time - fixedTime</c>. The recording started wherever
+        /// the engine happened to be; a replay started wherever it happens to be
+        /// now. At 60 frames against 50 Hz that is six different patterns, and
+        /// the enemies' AI, every rigidbody step, and (with the game's
+        /// autoSyncTransforms off) the moment a moved drawer or door becomes
+        /// visible to the pickup ray all shift by a frame between them.
+        ///
+        /// So before frame 0 the engine is run for one or two frames of a
+        /// computed, non-standard delta, with no input and no macro frame
+        /// counted: first a coarse hop that lands just short of the recording's
+        /// phase, then a tiny exact one onto it. The world snapshot is restored
+        /// afterwards, so the pre-roll's few milliseconds of AI time leave no
+        /// positional trace.
+        /// </summary>
+        public void UpdateAligning(bool simulating)
+        {
+            if (Mode != MacroMode.Aligning) return;
+            var step = _time.FixedStep;
+
+            if (!_alignReady)
+            {
+                var remaining = Wrap(_alignTarget - _time.FixedPhase, step);
+                var error = Math.Min(remaining, step - remaining);
+
+                // Only a frame that actually moved the clock uses up an attempt;
+                // a pause during pre-roll just waits.
+                var now = _time.EngineTime;
+                if (!Bits.Same(now, _alignLastTime))
+                {
+                    _alignLastTime = now;
+                    _alignAttempts++;
+                }
+                if (error <= AlignTolerance || _alignAttempts > MaxAlignAttempts)
+                {
+                    if (error > AlignTolerance)
+                        _log.Warning($"Could not align the fixed-step phase (still {error * 1e9:0.###} ns out); replaying anyway.");
+                    _alignReady = true;
+                    _alignReadyFrame = _time.EngineFrame;
+                    _time.EndAlignment();
+                    return;
+                }
+
+                // Land a little short with the coarse hop so the last hop is
+                // tiny: a float delta is only exact relative to its own size.
+                var hop = remaining > CoarseHopThreshold ? remaining - FineHopMargin : remaining;
+                _time.SetAlignmentDelta((float)hop);
+                return;
+            }
+
+            // The first simulated frame after normal timing resumed is frame 0.
+            if (!simulating || _time.EngineFrame <= _alignReadyFrame) return;
+
+            var phaseError = Math.Abs(Wrap(_time.FixedPhase - _alignFrame0Phase + step / 2, step) - step / 2);
+            if (phaseError > AlignTolerance && _alignAttempts < MaxAlignAttempts)
+            {
+                // Something advanced the clock in between (the game's pause menu
+                // opening, most likely). Go round again rather than start wrong.
+                _alignReady = false;
+                _time.BeginAlignment();
+                return;
+            }
+
+            _startPhaseError = phaseError;
+            StartPlaybackNow();
+        }
+
+        private static double Wrap(double value, double step)
+        {
+            if (!(step > 0)) return 0;
+            var r = value % step;
+            return r < 0 ? r + step : r;
+        }
+
+        private void StartPlaybackNow()
+        {
             // Put the world back before replaying anything. Without this the
             // inputs are replayed against wherever Granny happens to be now,
             // which is not the run that was recorded.
@@ -373,16 +561,14 @@ namespace GrannyTAS
                 try { restored = _macro.Snapshot.Restore(); }
                 catch (Exception e)
                 {
-                    _log.Error($"Playback aborted during positional restore: {e.Message}. Reload the level before retrying.");
-                    if (wasPreparing) CancelPreparing("Playback positional restore failed.");
+                    AbortStart($"Playback aborted during positional restore: {e.Message}. Reload the level before retrying.");
                     return;
                 }
                 _log.Msg($"Restored {restored}/{_macro.Snapshot.Entities.Count} entities to their recorded positions.");
 
                 if (restored < _macro.Snapshot.Entities.Count)
                 {
-                    _log.Warning("Playback aborted: some entities could not be found. Reload the recorded level.");
-                    if (wasPreparing) CancelPreparing("Playback positional restore was incomplete.");
+                    AbortStart("Playback aborted: some entities could not be found. Reload the recorded level.");
                     return;
                 }
             }
@@ -390,34 +576,72 @@ namespace GrannyTAS
             {
                 if (_macro.HasSetupMetadata)
                 {
-                    if (wasPreparing) CancelPreparing("Playback refused: macro has no world snapshot.");
-                    else _log.Warning("Playback refused: macro has no world snapshot.");
+                    AbortStart("Playback refused: macro has no world snapshot.");
                     return;
                 }
                 _log.Warning("Legacy macro has no world snapshot; starting position cannot be restored.");
+            }
+
+            var rigNote = "";
+            if (!_macro.Rig.IsEmpty)
+            {
+                try { rigNote = _macro.Rig.Restore(PlayerGate.Player); }
+                catch (Exception e) { rigNote = "player rig restore failed: " + e.Message; }
+                _log.Msg("Restored " + rigNote + ".");
             }
 
             // Playback is always real time, whatever speed the run was picked at.
             // AI reset methods may consume random values; reset the stream last.
             UnityEngine.Random.InitState(_macro.RngSeed);
 
-            // Save the pacing the player had chosen so StopPlayback can restore
-            // it — forcing 1x here is a property of the replay, not something
-            // that should overwrite (and, via TasConfig.Sync, persist) as their
-            // new preferred speed.
-            _speedBeforePlayback = _time.Speed;
-            _uncappedBeforePlayback = _time.Uncapped;
-            _time.SetSpeed(1f);
-            _time.SetPaused(false);
-
             VirtualInput.ResetForPlayback(_macro.InitialInput);
             PhysicsFrameState.ResetDrift();
+
+            _report = new SyncReport
+            {
+                MacroName = string.IsNullOrEmpty(LoadedPath) ? "" : Path.GetFileName(LoadedPath),
+                MacroFrames = _macro.Count,
+                TracesPresent = _macro.HasTraces,
+                StartPhaseError = _startPhaseError,
+                RigNote = rigNote,
+            };
+            SyncProbe.Begin();
+            SyncTracker.BeginReplay(_report, _pickupRecovery);
+
             _playhead = 0;
             _time.ResetFrameCount();
             Mode = MacroMode.Playing;
             _time.SimulationRatesLocked = true;
+            PendingStatus = "";
 
-            _log.Msg($"Playing {_macro.Count} frames at 1x ({_macro.DurationSeconds:0.##}s).");
+            _log.Msg($"Playing {_macro.Count} frames at 1x ({_macro.DurationSeconds:0.##}s)" +
+                     (double.IsNaN(_startPhaseError) ? "." : $", fixed-step phase aligned to within {_startPhaseError * 1e9:0.###} ns."));
+        }
+
+        /// <summary>Undo <see cref="BeginPlayback"/> when the replay cannot start after all.</summary>
+        private void AbortStart(string reason)
+        {
+            if (Mode == MacroMode.Preparing)
+            {
+                CancelPreparing(reason);
+                return;
+            }
+
+            _time.EndAlignment();
+            Mode = MacroMode.Idle;
+            _time.SimulationRatesLocked = false;
+            RestorePacing();
+            PendingStatus = reason;
+            _log.Warning(reason);
+        }
+
+        private void RestorePacing()
+        {
+            if (!_playbackPacingSaved) return;
+            _playbackPacingSaved = false;
+            // SetSpeed always clears Uncapped, so restore it first and re-apply turbo after.
+            _time.SetSpeed(_speedBeforePlayback);
+            _time.SetUncapped(_uncappedBeforePlayback);
         }
 
         public void StopPlayback(string reason = null)
@@ -427,15 +651,18 @@ namespace GrannyTAS
                 CancelPreparing(reason ?? "Playback setup cancelled.");
                 return;
             }
+            if (Mode == MacroMode.Aligning)
+            {
+                AbortStart(reason ?? "Playback cancelled before the first frame.");
+                return;
+            }
             if (Mode != MacroMode.Playing) return;
             Mode = MacroMode.Idle;
             _time.SimulationRatesLocked = false;
 
             // Put back whatever pacing the player had before playback forced
-            // 1x/capped — see the comment in StartPlaybackNow. SetSpeed always
-            // clears Uncapped, so restore it first and re-apply turbo after.
-            _time.SetSpeed(_speedBeforePlayback);
-            _time.SetUncapped(_uncappedBeforePlayback);
+            // 1x/capped — see the comment in BeginPlayback.
+            RestorePacing();
 
             var finalStatus = reason ?? $"Playback stopped at frame {_playhead}/{_macro.Count}.";
             PendingStatus = finalStatus;
@@ -446,7 +673,7 @@ namespace GrannyTAS
             // that lands on a different frame shows up here first, as a drift in
             // millimetres, long before it shows up as a missing item.
             if (_macro.Frames.Count > 0 && _macro.Frames[0].HasPosition)
-                _log.Msg($"Position drift: {VirtualInput.MaxPositionDrift * 1000f:0.###} mm peak, " +
+                _log.Msg($"Position drift: {VirtualInput.MaxPositionDrift * 1000f:0.######} mm peak, " +
                          $"{VirtualInput.PositionCorrections} frame(s) corrected" +
                          (VirtualInput.PinPosition ? "." : " (correction off — drift was measured, not fixed)."));
             else
@@ -456,6 +683,48 @@ namespace GrannyTAS
             if (_macro.Frames.Count > 0 && _macro.Frames[0].HasPhysicsState)
                 _log.Msg($"Rigidbody drift: {PhysicsFrameState.MaxPositionDrift * 1000f:0.######} mm peak, " +
                          $"{PhysicsFrameState.CorrectionCount} correction(s).");
+
+            FinishReport();
+        }
+
+        private void FinishReport()
+        {
+            SyncTracker.Stop();
+            SyncProbe.End();
+            var report = _report;
+            _report = null;
+            if (report == null) return;
+
+            report.PositionCorrections = VirtualInput.PositionCorrections;
+            report.RigidbodyCorrections = PhysicsFrameState.CorrectionCount;
+            if (VirtualInput.TeleportByToggle)
+                report.TeleportNote = "corrections fell back to disabling the CharacterController (Physics.SyncTransforms did not move it)";
+
+            LastReport = report;
+            LastReportPath = WriteReport(report);
+            var summary = report.Summary();
+            if (report.TracesPresent && !report.Exact) _log.Warning(summary);
+            else _log.Msg(summary);
+            if (LastReportPath != null) _log.Msg($"Sync report: {LastReportPath}");
+        }
+
+        private string WriteReport(SyncReport report)
+        {
+            if (report.FramesReplayed == 0) return null;
+            try
+            {
+                var dir = Path.Combine(MacroDirectory, "Reports");
+                Directory.CreateDirectory(dir);
+                var stem = string.IsNullOrEmpty(LoadedPath) ? "unsaved" : Path.GetFileNameWithoutExtension(LoadedPath);
+                var path = Path.Combine(dir, $"{stem}-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+                File.WriteAllLines(path, report.Lines());
+                return path;
+            }
+            catch (Exception e)
+            {
+                _log.Warning("Could not write the sync report: " + e.Message);
+                return null;
+            }
         }
 
         private void CancelPreparing(string reason)
@@ -467,6 +736,7 @@ namespace GrannyTAS
             _time.SimulationRatesLocked = false;
             _setup.CancelPending();
             if (_time.Enabled) _time.SetPaused(false);
+            RestorePacing();
             _log.Warning(reason);
         }
 
@@ -481,18 +751,26 @@ namespace GrannyTAS
 
             if (_playhead >= _macro.Count)
             {
+                SyncTracker.CompleteReplay();
                 StopPlayback($"Playback finished — {_macro.Count} frames.");
                 return false;
             }
 
             var frame = _macro.Frames[_playhead];
+
+            // Measure first, correct second: everything the sync check compares
+            // is read before a single corrective write, so a correction can
+            // never hide the divergence it corrects.
+            CompareBoundary(frame);
+            SyncTracker.ReplayIssued(_playhead, frame.Trace);
+
             if (frame.HasPhysicsState)
             {
                 try
                 {
                     if (!PhysicsFrameState.TryApply(frame.PhysicsStates, out var error))
                     {
-                        StopPlayback($"Playback aborted at frame {_playhead}: physics desync — {error}.");
+                        StopPlayback($"Playback aborted at frame {_playhead}: invalid rigidbody checkpoint — {error}.");
                         return false;
                     }
                 }
@@ -501,11 +779,46 @@ namespace GrannyTAS
                     StopPlayback($"Playback aborted at frame {_playhead}: physics checkpoint failed — {e.Message}");
                     return false;
                 }
+                ReportRigidbodies(frame);
             }
 
             VirtualInput.AdvanceFrom(frame);
             _playhead++;
             return true;
+        }
+
+        private void CompareBoundary(InputFrame frame)
+        {
+            if (_report == null) return;
+            var actual = new FrameTrace();
+            try { SyncProbe.CaptureBoundary(actual); }
+            catch { actual = null; }
+            _poseScratch.Clear();
+            VirtualInput.CapturePose(_poseScratch);
+            _report.CompareBoundary(_playhead, frame, _report.TracesPresent ? actual : null, _poseScratch);
+            _report.FramesReplayed = _playhead + 1;
+        }
+
+        private void ReportRigidbodies(InputFrame frame)
+        {
+            if (_report == null) return;
+            if (PhysicsFrameState.LastMissing > 0)
+            {
+                if (_report.MissingRigidbodies == 0) _report.FirstMissingRigidbody = PhysicsFrameState.LastFirstMissing;
+                _report.MissingRigidbodies += PhysicsFrameState.LastMissing;
+            }
+
+            if (PhysicsFrameState.LastDiffering > 0 || PhysicsFrameState.LastMissing > 0)
+            {
+                var note = PhysicsFrameState.LastDiffering > 0
+                    ? $"{PhysicsFrameState.LastDiffering} body(ies) differ; worst {PhysicsFrameState.LastWorstNote}"
+                    : "";
+                if (PhysicsFrameState.LastMissing > 0)
+                    note += (note.Length > 0 ? "; " : "") +
+                            $"{PhysicsFrameState.LastMissing} recorded body(ies) missing, first '{PhysicsFrameState.LastFirstMissing}'";
+                _report.Differ(SyncReport.Area.Rigidbodies, _playhead, PhysicsFrameState.LastWorstPosition, note);
+            }
+            else if (frame.PhysicsStates.Count > 0) _report.Match(SyncReport.Area.Rigidbodies);
         }
 
         /// <summary>
@@ -520,12 +833,10 @@ namespace GrannyTAS
             var copy = new InputFrame();
             copy.CopyFrom(VirtualInput.ForRecord);
 
-            // EnumerateActive throws InvalidOperationException on a duplicate
-            // rigidbody identity (two loaded scenes can have root objects at the
-            // same sibling index) — this runs every OnUpdate, so an uncaught
-            // throw here would escape the mod's update loop. Mirror the
-            // playback-side guard in TryDrivePlayback: fail the recording
-            // cleanly instead of adding a half-captured frame.
+            // A checkpoint failure runs every OnUpdate, so an uncaught throw
+            // here would escape the mod's update loop. Mirror the playback-side
+            // guard in TryDrivePlayback: fail the recording cleanly instead of
+            // adding a half-captured frame.
             try
             {
                 PhysicsFrameState.CaptureInto(copy.PhysicsStates);
@@ -536,9 +847,17 @@ namespace GrannyTAS
                 StopRecording();
                 return;
             }
-
             copy.HasPhysicsState = true;
+
+            // The same boundary state a replay will be compared against. Read
+            // only; a trace that cannot be taken costs the check, not the take.
+            var trace = new FrameTrace();
+            try { SyncProbe.CaptureBoundary(trace); }
+            catch (Exception e) { _log.Warning($"Frame {_macro.Count}: sync trace incomplete — {e.Message}"); }
+            copy.Trace = trace;
+
             _macro.Frames.Add(copy);
+            SyncTracker.RecordIssued(_macro.Count - 1, trace);
             _playhead = _macro.Count;
         }
 

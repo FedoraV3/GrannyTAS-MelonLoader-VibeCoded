@@ -1,7 +1,7 @@
 using MelonLoader;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(GrannyTAS.GrannyTasMod), "GrannyTAS", "0.3.3", "ir0n1c")]
+[assembly: MelonInfo(typeof(GrannyTAS.GrannyTasMod), "GrannyTAS", "0.4.0", "ir0n1c")]
 // Values as MelonLoader itself resolves them at startup (see MelonLoader/Latest.log).
 // Note app.info spells the product "Granny Legacy" without the colon; the log is
 // what the compatibility check actually compares against.
@@ -46,7 +46,13 @@ namespace GrannyTAS
 
             PickupDiagnostics.Log = LoggerInstance;
             VirtualInput.PinPosition = Config.PinPlaybackPosition;
+            InteractionPin.Enabled = Config.PinInteractionRays;
             PickupDiagnostics.Enabled = Config.PickupTrace;
+            SyncProbe.ReadRandomState = RandomProbe.TryRead;
+            PhysicsFrameState.Warn = msg => LoggerInstance.Warning(msg);
+            VirtualInput.TeleportFallbackEngaged = () => LoggerInstance.Warning(
+                "Position corrections are not sticking via Physics.SyncTransforms; falling back to " +
+                "disabling the CharacterController around each correction for the rest of this session.");
             if (PickupDiagnostics.Enabled)
                 LoggerInstance.Msg("Pickup trace on — every interact press logs its gate chain.");
 
@@ -74,7 +80,8 @@ namespace GrannyTAS
         public override void OnApplicationQuit()
         {
             if (Macro?.Mode == MacroMode.Recording) Macro.StopRecording();
-            if (Macro?.Mode == MacroMode.Playing || Macro?.Mode == MacroMode.Preparing) Macro.StopPlayback();
+            if (Macro?.Mode == MacroMode.Playing || Macro?.Mode == MacroMode.Preparing || Macro?.Mode == MacroMode.Aligning)
+                Macro.StopPlayback();
             Config.Sync(Time);
             Config.Flush();
         }
@@ -97,7 +104,7 @@ namespace GrannyTAS
                 if (Macro.Mode == MacroMode.Preparing)
                 {
                     Macro.UpdatePreparing(PlayerGate.IsReady);
-                    if (Macro.Mode == MacroMode.Playing)
+                    if (Macro.Mode == MacroMode.Playing || Macro.Mode == MacroMode.Aligning)
                     {
                         VirtualInput.Active = true;
                     }
@@ -116,6 +123,7 @@ namespace GrannyTAS
             Config.Tick();
             PickupDiagnostics.Enabled = Config.PickupTrace;
             VirtualInput.PinPosition = Config.PinPlaybackPosition;
+            InteractionPin.Enabled = Config.PinInteractionRays;
 
             // A restart request can make control disappear and disable timing.
             // Keep the request alive, but never advance input or the TAS frame
@@ -160,6 +168,18 @@ namespace GrannyTAS
             }
 
             var simulating = Time.OnUpdate();
+
+            // Pre-roll before a replay's first frame: the engine clock moves so
+            // the fixed-step phase can be put where the recording had it, but no
+            // input is delivered and nothing counts as a macro frame. On the
+            // frame alignment completes this switches to Playing, and that same
+            // frame issues macro frame 0 below.
+            if (Macro.Mode == MacroMode.Aligning) Macro.UpdateAligning(simulating);
+            if (Macro.Mode == MacroMode.Aligning)
+            {
+                VirtualInput.Freeze();
+                return;
+            }
 
             if (simulating)
             {
@@ -244,6 +264,7 @@ namespace GrannyTAS
                 LoggerInstance.Msg(
                     $"Engaged — {Time.TickRate} fps sim, {Time.PhysicsRate} Hz physics, " +
                     $"{Time.Speed:0.##}x speed ({Time.EffectiveFpsCap} fps cap).");
+                LogPhysicsSettingsOnce();
             }
             else if (!ready && Time.Enabled)
             {
@@ -257,7 +278,8 @@ namespace GrannyTAS
                 if (macroActive && PlayerGate.CanBridgeTransientControlLoss) return;
 
                 if (Macro.Mode == MacroMode.Recording) Macro.StopRecording();
-                if (Macro.Mode == MacroMode.Playing) Macro.StopPlayback("Playback stopped — lost player control.");
+                if (Macro.Mode == MacroMode.Playing || Macro.Mode == MacroMode.Aligning)
+                    Macro.StopPlayback("Playback stopped — lost player control.");
 
                 Time.Disable(preserveGameTimeScale: Il2Cpp.Paused.IsPaused);
                 VirtualInput.Active = false;
@@ -285,8 +307,30 @@ namespace GrannyTAS
 
         public void TogglePlay()
         {
-            if (Macro.Mode == MacroMode.Playing || Macro.Mode == MacroMode.Preparing) Macro.StopPlayback();
+            if (Macro.Mode == MacroMode.Playing || Macro.Mode == MacroMode.Preparing || Macro.Mode == MacroMode.Aligning)
+                Macro.StopPlayback();
             else Macro.StartPlayback();
+        }
+
+        private bool _loggedPhysicsSettings;
+
+        /// <summary>
+        /// The two engine physics settings replay determinism leans on, once per
+        /// session. With autoSyncTransforms off (the game's setting), a collider
+        /// moved by a transform — a drawer, a door, Granny — only becomes visible
+        /// to raycasts at the next physics step, which is why the fixed-step
+        /// phase decides what the pickup ray can hit.
+        /// </summary>
+        private void LogPhysicsSettingsOnce()
+        {
+            if (_loggedPhysicsSettings) return;
+            _loggedPhysicsSettings = true;
+            try
+            {
+                LoggerInstance.Msg($"Physics: autoSyncTransforms={Physics.autoSyncTransforms}, " +
+                                   $"fixed step {UnityEngine.Time.fixedDeltaTime:R}s.");
+            }
+            catch { }
         }
 
         /// <summary>Whether the ImGui panel is currently up.</summary>
@@ -486,6 +530,8 @@ namespace GrannyTAS
                     return $"<color=#66ff66>PLAY</color> {Macro.Playhead}/{Macro.FrameCount}";
                 case MacroMode.Preparing:
                     return "<color=#ffcc00>PREPARING</color>";
+                case MacroMode.Aligning:
+                    return "<color=#ffcc00>ALIGNING</color>";
                 default:
                     return Macro.FrameCount > 0 ? $"idle ({Macro.FrameCount} frames)" : "idle";
             }

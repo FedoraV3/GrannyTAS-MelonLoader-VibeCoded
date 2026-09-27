@@ -21,7 +21,8 @@ namespace GrannyTAS
     /// </summary>
     public sealed class MacroFile
     {
-        public const string Magic = "# GrannyTAS macro v4";
+        public const string Magic = "# GrannyTAS macro v5";
+        private const string V4Magic = "# GrannyTAS macro v4";
         private const string V3Magic = "# GrannyTAS macro v3";
         private const string V2Magic = "# GrannyTAS macro v2";
         private const string LegacyMagic = "# GrannyTAS macro v1";
@@ -65,6 +66,16 @@ namespace GrannyTAS
         /// </summary>
         public WorldSnapshot Snapshot = new WorldSnapshot();
 
+        /// <summary>
+        /// The player's internal state when recording began (animation phase,
+        /// local transforms, controller geometry, movement/fall/crouch flags).
+        /// Empty for macros recorded before v5.
+        /// </summary>
+        public PlayerRigSnapshot Rig = new PlayerRigSnapshot();
+
+        /// <summary>Whether frames carry sync traces, i.e. whether the replay can be checked bit for bit.</summary>
+        public bool HasTraces => Frames.Count > 0 && Frames[0].Trace != null;
+
         public readonly List<InputFrame> Frames = new List<InputFrame>();
 
         public int Count => Frames.Count;
@@ -92,6 +103,7 @@ namespace GrannyTAS
             sb.AppendLine(Inv($"frames={Frames.Count}"));
             sb.AppendLine("initialInput=" + Encode(InitialInput));
             foreach (var line in Snapshot.Encode()) sb.AppendLine(line);
+            foreach (var line in Rig.Encode()) sb.AppendLine(line);
             sb.AppendLine("---");
 
             foreach (var f in Frames) sb.AppendLine(Encode(f));
@@ -130,7 +142,8 @@ namespace GrannyTAS
                 if (line.Length == 0) continue;
                 if (!magic)
                 {
-                    if (line == Magic) version = 4;
+                    if (line == Magic) version = 5;
+                    else if (line == V4Magic) version = 4;
                     else if (line == V3Magic) version = 3;
                     else if (line == V2Magic) version = 2;
                     else if (line == LegacyMagic) version = 1;
@@ -172,6 +185,9 @@ namespace GrannyTAS
                             case "initialInput": macro.InitialInput = Decode(val, version); break;
                             case "player":
                             case "entity": macro.Snapshot.AddDecoded(key, val); break;
+                            case "rigValue":
+                            case "rigAnim":
+                            case "rigPose": macro.Rig.AddDecoded(key, val); break;
                         }
                         continue;
                     }
@@ -234,7 +250,7 @@ namespace GrannyTAS
                 if (line.Length == 0) continue;
                 if (!magic)
                 {
-                    if (line != Magic && line != V3Magic && line != V2Magic && line != LegacyMagic)
+                    if (line != Magic && line != V4Magic && line != V3Magic && line != V2Magic && line != LegacyMagic)
                         throw new FormatException("Missing or unsupported GrannyTAS macro version.");
                     magic = true;
                     continue;
@@ -260,7 +276,8 @@ namespace GrannyTAS
             return new MacroHeaderInfo(frames, tickRate, scene);
         }
 
-        // v4 adds a sixth field containing the pre-frame rigidbody checkpoint.
+        // v4 adds a sixth field containing the pre-frame rigidbody checkpoint;
+        // v5 a seventh with the frame's sync trace (see FrameTrace).
         private static string Encode(InputFrame f)
         {
             var keys = new List<string>();
@@ -308,7 +325,7 @@ namespace GrannyTAS
             return string.Join("|", new[]
             {
                 string.Join(",", keys), bits.ToString(CultureInfo.InvariantCulture), axes, rawAxes, pose,
-                EncodePhysics(f.PhysicsStates)
+                EncodePhysics(f.PhysicsStates), f.Trace?.Encode() ?? "-"
             });
         }
 
@@ -316,13 +333,15 @@ namespace GrannyTAS
         {
             var f = new InputFrame();
             var parts = line.Split('|');
-            var expectedParts = version >= 4 ? 6 : version >= 2 ? 5 : 3;
+            var expectedParts = version >= 5 ? 7 : version >= 4 ? 6 : version >= 2 ? 5 : 3;
             if (parts.Length != expectedParts)
-                throw new FormatException(version >= 2
-                    ? version >= 4
+                throw new FormatException(version >= 5
+                    ? "Expected keys|mouse buttons|five axes|five raw axes|pose|physics state|trace."
+                    : version >= 4
                         ? "Expected keys|mouse buttons|five axes|five raw axes|pose|physics state."
-                        : "Expected keys|mouse buttons|five axes|five raw axes|pose."
-                    : "Expected keys|mouse buttons|five axes.");
+                        : version >= 2
+                            ? "Expected keys|mouse buttons|five axes|five raw axes|pose."
+                            : "Expected keys|mouse buttons|five axes.");
 
             if (parts.Length > 0 && parts[0].Length > 0)
                 foreach (var name in parts[0].Split(','))
@@ -385,6 +404,8 @@ namespace GrannyTAS
                 DecodePhysics(parts[5], f.PhysicsStates);
                 f.HasPhysicsState = true;
             }
+
+            if (version >= 5) f.Trace = FrameTrace.Decode(parts[6]);
 
             return f;
         }

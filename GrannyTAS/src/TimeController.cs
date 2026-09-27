@@ -48,6 +48,9 @@ namespace GrannyTAS
         public bool GamePaused { get; private set; }
         public bool SimulationRatesLocked { get; set; }
         public bool TimingMismatch { get; private set; }
+
+        /// <summary>Whether the last checked Update delta was exactly <c>1 / TickRate</c>, bit for bit.</summary>
+        public bool DeltaExact { get; private set; } = true;
         public float ObservedFrameDelta { get; private set; }
 
         /// <summary>
@@ -84,9 +87,91 @@ namespace GrannyTAS
         /// </summary>
         public int PausedFpsCap => Uncapped ? -1 : Mathf.Max(60, EffectiveFpsCap);
 
-        // Engine-owned systems must receive the pacing change too. Use the
-        // rounded cap's actual speed: e.g. 165 * .56 rounds to 92 fps.
-        public float RunningTimeScale => Uncapped ? 1f : EffectiveFpsCap / TickRate;
+        /// <summary>
+        /// The engine timeScale while running: the power of two nearest the
+        /// capped speed (<c>EffectiveFpsCap / TickRate</c>).
+        ///
+        /// Engine-owned systems still see slow motion as slow motion, but the
+        /// scale is quantised so that <c>captureDeltaTime * timeScale</c> is
+        /// exactly <c>1 / TickRate</c> — in float *and* in double. With the
+        /// unquantised scale (29/60 at 0.48x) the float product happened to
+        /// round back to 1/60 but the double product did not, so the engine's
+        /// double-precision clock advanced by a different amount per frame
+        /// while recording at 0.48x than while replaying at 1x. That moves the
+        /// fixed-step phase a few hundred picoseconds per frame, and over a
+        /// long run is enough to move a FixedUpdate onto a neighbouring frame.
+        /// Dividing by a power of two only changes the exponent, so the
+        /// compensated capture delta is exact by construction. Pacing is still
+        /// set precisely by the frame cap.
+        /// </summary>
+        public float RunningTimeScale => Uncapped ? 1f : ExactScale(EffectiveFpsCap / TickRate);
+
+        internal static float ExactScale(float approximate)
+        {
+            if (!float.IsFinite(approximate) || approximate <= 0f) return 1f;
+            var exponent = (int)System.Math.Round(System.Math.Log(approximate, 2.0));
+            exponent = System.Math.Clamp(exponent, -10, 7);
+            return (float)System.Math.Pow(2.0, exponent);
+        }
+
+        /// <summary>
+        /// How far into the current fixed step the engine clock is:
+        /// <c>Time.timeAsDouble - Time.fixedTimeAsDouble</c>. With the Update
+        /// and fixed deltas pinned, this at the first macro frame decides which
+        /// later frames get a FixedUpdate, so a replay has to start from the
+        /// recording's value — see <see cref="SetAlignmentDelta"/>.
+        /// </summary>
+        public double FixedPhase => Time.timeAsDouble - Time.fixedTimeAsDouble;
+
+        /// <summary>The fixed step as the engine accumulates it.</summary>
+        public double FixedStep => Time.fixedDeltaTime;
+
+        public int EngineFrame => Time.frameCount;
+
+        /// <summary>The engine's double-precision frame clock.</summary>
+        public double EngineTime => Time.timeAsDouble;
+
+        /// <summary>
+        /// True while the macro engine is moving the fixed-step phase into place
+        /// before a replay. Frames in this state are pre-roll: they advance the
+        /// engine clock by whatever <see cref="SetAlignmentDelta"/> asked for,
+        /// and never count as a macro frame.
+        /// </summary>
+        public bool Aligning { get; private set; }
+        private float _alignDelta;
+
+        /// <summary>
+        /// Begin pre-roll. Until a delta is set, frames keep the normal timing
+        /// but are not counted as macro frames.
+        /// </summary>
+        public void BeginAlignment()
+        {
+            if (!Enabled) return;
+            Aligning = true;
+            _alignDelta = 0f;
+            Apply();
+        }
+
+        /// <summary>
+        /// Run the following frames with exactly <paramref name="delta"/>
+        /// simulated seconds each (timeScale 1). Takes effect from the next
+        /// engine frame, because Unity chooses a frame's delta before Update.
+        /// </summary>
+        public void SetAlignmentDelta(float delta)
+        {
+            if (!Enabled || !Aligning) return;
+            _alignDelta = float.IsFinite(delta) && delta > 0f ? delta : 0f;
+            Apply();
+        }
+
+        /// <summary>Return to normal timing; the next simulated frame is a macro frame again.</summary>
+        public void EndAlignment()
+        {
+            if (!Aligning) return;
+            Aligning = false;
+            _alignDelta = 0f;
+            Apply();
+        }
 
         /// <summary>
         /// A step cannot be serviced within the frame that requests it. By the
@@ -175,12 +260,15 @@ namespace GrannyTAS
             Enabled = false;
             Paused = false;
             GamePaused = false;
+            Aligning = false;
+            _alignDelta = 0f;
             SimulationRatesLocked = false;
             _step = StepState.None;
             _stepsRemaining = 0;
             _reportedDrift = false;
             _reportedPause = false;
             TimingMismatch = false;
+            DeltaExact = true;
         }
 
         /// <summary>
@@ -292,6 +380,10 @@ namespace GrannyTAS
             // The live pause flag is authoritative for TAS advancement.
             if (GamePaused) return false;
 
+            // Pre-roll frames move the engine clock but are never macro frames,
+            // whatever delta they ran with.
+            if (Aligning) return false;
+
             // One-shot readout on the first frame of a pause. A pause that does
             // not hold looks exactly like frozen input from the outside, so the
             // engine's actual numbers are worth a line in the log.
@@ -318,6 +410,14 @@ namespace GrannyTAS
                     Log?.Invoke($"TAS clock mismatch: Update delta={ObservedFrameDelta:R}, expected={expected:R}, " +
                                 $"timeScale={Time.timeScale:R}, captureDelta={Time.captureDeltaTime:R}. Replay timing is not verified.");
                 TimingMismatch = mismatch;
+
+                // Close is not the same: a delta one bit off at one speed and
+                // not at another is a replay that drifts by construction.
+                var exact = Bits.Same(ObservedFrameDelta, expected);
+                if (!exact && DeltaExact && !mismatch)
+                    Log?.Invoke($"TAS clock is close but not bit-exact: Update delta={ObservedFrameDelta:R}, " +
+                                $"expected={expected:R}, timeScale={Time.timeScale:R}, captureDelta={Time.captureDeltaTime:R}.");
+                DeltaExact = exact;
             }
             if (simulating) FrameCount++;
             return simulating;
@@ -372,6 +472,7 @@ namespace GrannyTAS
             }
 
             var frozen = GamePaused || (Paused && _step != StepState.Running);
+            var aligning = !frozen && Aligning && _alignDelta > 0f;
             _framesSinceApply = 0;
             TimingMismatch = false;
 
@@ -381,9 +482,10 @@ namespace GrannyTAS
             // scaled Update delta stays 1/TickRate rather than slowing twice.
             // Unity 2022.3 documents captureDeltaTime as scaled by timeScale.
             // A requested step runs at normal pacing; idle pause frames keep
-            // both clocks at zero (including the capture override).
-            _wantTimeScale = frozen ? 0f : (_step == StepState.Running ? 1f : RunningTimeScale);
-            _wantCapture = frozen ? 0f : (1f / TickRate) / _wantTimeScale;
+            // both clocks at zero (including the capture override). Alignment
+            // pre-roll runs unscaled with exactly the delta it asked for.
+            _wantTimeScale = frozen ? 0f : (aligning || _step == StepState.Running ? 1f : RunningTimeScale);
+            _wantCapture = frozen ? 0f : aligning ? _alignDelta : (1f / TickRate) / _wantTimeScale;
             Time.timeScale = _wantTimeScale;
             Time.captureDeltaTime = _wantCapture;
 
@@ -396,7 +498,7 @@ namespace GrannyTAS
             Time.maximumDeltaTime = Mathf.Max(Time.fixedDeltaTime * 16f, 4f / TickRate);
 
             Application.targetFrameRate = frozen ? PausedFpsCap :
-                (_step == StepState.Running ? Mathf.Max(1, Mathf.RoundToInt(TickRate)) : EffectiveFpsCap);
+                (aligning || _step == StepState.Running ? Mathf.Max(1, Mathf.RoundToInt(TickRate)) : EffectiveFpsCap);
         }
 
         /// <summary>
