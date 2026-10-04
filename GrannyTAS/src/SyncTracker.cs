@@ -37,9 +37,11 @@ namespace GrannyTAS
         private static FrameTrace _expected;
         private static FrameTrace _actual = new FrameTrace();
         private static readonly int[] RayCursor = new int[2];
-        private static IPickupRecovery _pickupRecovery;
-        private static bool _suppressPickup;
-        private const int MaxPickupRecoveriesPerFrame = 16;
+
+        // Replay: pickups in _actual that the mod made rather than the game's
+        // own pickup code (InteractionPin.ForcePending), this window.
+        private static readonly List<string> Forced = new List<string>();
+        private static bool _forcing;
 
         /// <summary>True once a macro frame exists for events to belong to.</summary>
         public static bool Active => Mode != TrackMode.Off && LastIssued >= 0;
@@ -56,11 +58,10 @@ namespace GrannyTAS
             Mode = TrackMode.Recording;
         }
 
-        public static void BeginReplay(SyncReport report, IPickupRecovery pickupRecovery = null)
+        public static void BeginReplay(SyncReport report)
         {
             Reset();
             Report = report;
-            _pickupRecovery = pickupRecovery;
             Mode = TrackMode.Replaying;
         }
 
@@ -79,9 +80,9 @@ namespace GrannyTAS
             _recording = null;
             _expected = null;
             _actual = new FrameTrace();
-            _pickupRecovery = null;
-            _suppressPickup = false;
             RayCursor[0] = RayCursor[1] = 0;
+            Forced.Clear();
+            _forcing = false;
         }
 
         /// <summary>Recording: frame <paramref name="index"/> was just captured into <paramref name="trace"/>.</summary>
@@ -107,6 +108,7 @@ namespace GrannyTAS
             _expected = expected;
             _actual = new FrameTrace();
             RayCursor[0] = RayCursor[1] = 0;
+            Forced.Clear();
         }
 
         /// <summary>
@@ -123,128 +125,76 @@ namespace GrannyTAS
             _expected = null;
             _actual = new FrameTrace();
             RayCursor[0] = RayCursor[1] = 0;
+            Forced.Clear();
         }
 
         private static void CloseReplayWindow(bool compareRays)
         {
             if (LastIssued < 0 || Report == null || !Report.TracesPresent) return;
-
-            // The report must see the unassisted replay before recovery changes
-            // inventory or removes a world source.
-            Report.CompareEvents(LastIssued, _expected, _actual, RayCursor, compareRays);
-            RecoverMissingPickupSuffix();
+            Report.CompareEvents(LastIssued, _expected, _actual, RayCursor, compareRays, Forced);
         }
 
-        private static void RecoverMissingPickupSuffix()
+        /// <summary>
+        /// Replay: how many more times the recording picked up
+        /// <paramref name="item"/> in the current frame's window than the
+        /// replay has so far. 0 outside a replay window.
+        /// </summary>
+        public static int PendingPickups(string item)
         {
-            if (_pickupRecovery == null || _expected == null || _actual == null || _expected.Pickups.Count == 0)
-                return;
-
-            var expectedCount = _expected.Pickups.Count;
-            var actualCount = _actual.Pickups.Count;
-            if (expectedCount == actualCount)
-            {
-                var identical = true;
-                for (var i = 0; i < expectedCount; i++)
-                    if (_expected.Pickups[i] != _actual.Pickups[i]) { identical = false; break; }
-                if (identical) return;
-            }
-
-            // Greedily consume recorded occurrences in order. The latest
-            // natural match anchors recovery: older misses are reported but
-            // left alone because forcing one would overwrite a later pickup.
-            var occurrences = new Dictionary<string, Queue<int>>(System.StringComparer.Ordinal);
-            for (var i = 0; i < expectedCount; i++)
-            {
-                var name = _expected.Pickups[i] ?? "";
-                if (!occurrences.TryGetValue(name, out var queue)) occurrences[name] = queue = new Queue<int>();
-                queue.Enqueue(i);
-            }
-            var cursor = 0;
-            var lastNaturalExpected = -1;
-            var naturalMatches = 0;
-            for (var i = 0; i < actualCount; i++)
-            {
-                var name = _actual.Pickups[i] ?? "";
-                if (!occurrences.TryGetValue(name, out var queue)) continue;
-                while (queue.Count > 0 && queue.Peek() < cursor) queue.Dequeue();
-                if (queue.Count == 0) continue;
-                lastNaturalExpected = queue.Dequeue();
-                cursor = lastNaturalExpected + 1;
-                naturalMatches++;
-            }
-
-            var prefixMisses = lastNaturalExpected < 0 ? 0 : lastNaturalExpected + 1 - naturalMatches;
-            if (prefixMisses > 0)
-                Report.RecordPickupRecoverySkipped(LastIssued, prefixMisses,
-                    "earlier recorded pickup(s) precede an item already picked naturally");
-
-            var attempts = 0;
-            var forcedAny = false;
-            var failed = false;
-            var lastForced = "";
-            for (var i = lastNaturalExpected + 1; i < expectedCount; i++)
-            {
-                if (attempts >= MaxPickupRecoveriesPerFrame)
-                {
-                    Report.RecordPickupRecoverySkipped(LastIssued, expectedCount - i,
-                        $"per-frame recovery limit ({MaxPickupRecoveriesPerFrame}) reached");
-                    break;
-                }
-
-                attempts++;
-                var item = _expected.Pickups[i] ?? "";
-                var result = TryRecover(item);
-
-                Report.RecordPickupRecovery(LastIssued, item, result);
-                if (result.Outcome == PickupRecoveryOutcome.Failed)
-                {
-                    failed = true;
-                    var remaining = _expected.Pickups.Count - i - 1;
-                    if (remaining > 0)
-                        Report.RecordPickupRecoverySkipped(LastIssued, remaining,
-                            "recovery transaction stopped after a failure");
-                    break;
-                }
-                forcedAny = true;
-                lastForced = item;
-            }
-
-            // Forcing an earlier missed item can replace a later item that was
-            // picked naturally. Re-equip the recording's terminal item so the
-            // player's hand ends in the recorded state. A trailing unrelated
-            // replay pickup needs the same repair even when no expected call
-            // was missing.
-            var terminal = _expected.Pickups[expectedCount - 1] ?? "";
-            var actualTerminal = actualCount == 0 ? "" : _actual.Pickups[actualCount - 1] ?? "";
-            if (!failed && ((forcedAny && lastForced != terminal) || (!forcedAny && actualTerminal != terminal)))
-            {
-                if (attempts >= MaxPickupRecoveriesPerFrame)
-                    Report.RecordPickupRecoverySkipped(LastIssued, 1,
-                        $"per-frame recovery limit ({MaxPickupRecoveriesPerFrame}) reached before terminal item restore");
-                else
-                {
-                    var result = TryRecover(terminal);
-                    Report.RecordPickupRecovery(LastIssued, terminal, result);
-                }
-            }
+            if (Mode != TrackMode.Replaying || LastIssued < 0 || _expected == null) return 0;
+            item ??= "";
+            var pending = 0;
+            foreach (var p in _expected.Pickups) if (p == item) pending++;
+            foreach (var p in _actual.Pickups) if (p == item) pending--;
+            return pending;
         }
 
-        private static PickupRecoveryResult TryRecover(string item)
+        /// <summary>
+        /// Replay: every pickup the recording made in the current frame's window
+        /// that the replay has not made yet, in recorded order. Empty outside a
+        /// replay window.
+        /// </summary>
+        public static List<string> PendingPickupList()
         {
-            _suppressPickup = true;
-            try { return _pickupRecovery.TryRecover(item); }
-            catch (System.Exception e) { return PickupRecoveryResult.Failed(e.Message); }
-            finally { _suppressPickup = false; }
+            var pending = new List<string>();
+            if (Mode != TrackMode.Replaying || LastIssued < 0 || _expected == null) return pending;
+            pending.AddRange(_expected.Pickups);
+            foreach (var p in _actual.Pickups) pending.Remove(p);
+            return pending;
         }
+
+        /// <summary>
+        /// Replay: whether the recording cast a ray of this kind in the current
+        /// window after the ones the replay has cast so far.
+        /// </summary>
+        public static bool MoreExpectedRays(int kind)
+        {
+            if (Mode != TrackMode.Replaying || _expected == null || kind < 0 || kind > 1) return false;
+            var recorded = 0;
+            foreach (var r in _expected.Rays) if (r.Kind == kind) recorded++;
+            return RayCursor[kind] < recorded;
+        }
+
+        /// <summary>
+        /// Replay: pickups until <see cref="EndForcedPickup"/> are the mod's,
+        /// not the game's. They count toward the frame's pickups, so nothing
+        /// forces them twice, and the report still lists them as missed.
+        /// </summary>
+        public static void BeginForcedPickup() => _forcing = Mode == TrackMode.Replaying;
+
+        public static void EndForcedPickup() => _forcing = false;
 
         // ---- events -------------------------------------------------------------
 
         public static void OnPickup(string item)
         {
-            if (!Active || _suppressPickup) return;
+            if (!Active) return;
             if (Mode == TrackMode.Recording) _recording?.Pickups.Add(item ?? "");
-            else _actual.Pickups.Add(item ?? "");
+            else
+            {
+                _actual.Pickups.Add(item ?? "");
+                if (_forcing) Forced.Add(item ?? "");
+            }
         }
 
         public static void RecordRay(RaySample sample)

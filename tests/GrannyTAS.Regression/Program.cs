@@ -926,188 +926,6 @@ SyncTracker.Stop();
 Check(pickupReport[SyncReport.Area.Pickups].Differing == 1 && pickupReport[SyncReport.Area.Pickups].FirstFrame == 0,
     "a missed pickup is reported on the frame it was recorded, and the final frame's window is not compared");
 
-var recovery = new FakePickupRecovery();
-recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
-var recoveryReport = new SyncReport { TracesPresent = true };
-var pliersTrace = new FrameTrace();
-pliersTrace.Pickups.Add("Pliers");
-SyncTracker.BeginReplay(recoveryReport, recovery);
-SyncTracker.ReplayIssued(0, pliersTrace);
-SyncTracker.OnPickup("Pliers");
-recovery.Held = "Pliers";
-SyncTracker.ReplayIssued(1, new FrameTrace());
-Check(recovery.Calls.Count == 0 && recoveryReport.PickupRecoveries == 0,
-    "a natural recorded pickup is never duplicated by recovery");
-SyncTracker.Stop();
-
-recovery = new FakePickupRecovery();
-recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
-recoveryReport = new SyncReport { TracesPresent = true };
-SyncTracker.BeginReplay(recoveryReport, recovery);
-SyncTracker.ReplayIssued(0, pliersTrace);
-SyncTracker.ReplayIssued(1, new FrameTrace());
-Check(recovery.Calls.SequenceEqual(new[] { "Pliers" }) && recovery.Held == "Pliers" &&
-      recoveryReport.PickupRecoveries == 1 && recoveryReport[SyncReport.Area.Pickups].Differing == 1,
-    "a missed pliers pickup is reported before it is forced into the hand");
-SyncTracker.OnPickup("Pliers");
-SyncTracker.ReplayIssued(2, new FrameTrace());
-Check(recovery.Calls.Count == 1,
-    "a forced pickup is not attributed to the next replay frame");
-SyncTracker.Stop();
-
-var twoPickups = new FrameTrace();
-twoPickups.Pickups.Add("Hammer");
-twoPickups.Pickups.Add("Pliers");
-recovery = new FakePickupRecovery();
-recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
-recoveryReport = new SyncReport { TracesPresent = true };
-SyncTracker.BeginReplay(recoveryReport, recovery);
-SyncTracker.ReplayIssued(0, twoPickups);
-SyncTracker.ReplayIssued(1, new FrameTrace());
-Check(recovery.Calls.SequenceEqual(new[] { "Hammer", "Pliers" }) && recovery.Held == "Pliers" &&
-      recoveryReport.PickupRecoveries == 2,
-    "multiple missed pickups are recovered once in recorded order");
-SyncTracker.Stop();
-
-recovery = new FakePickupRecovery { Held = "Hammer" };
-recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
-recoveryReport = new SyncReport { TracesPresent = true };
-SyncTracker.BeginReplay(recoveryReport, recovery);
-SyncTracker.ReplayIssued(0, pliersTrace);
-SyncTracker.OnPickup("Hammer");
-SyncTracker.ReplayIssued(1, new FrameTrace());
-Check(recovery.Calls.SequenceEqual(new[] { "Pliers" }) && recovery.Held == "Pliers",
-    "a wrong natural pickup is replaced by the recorded item");
-SyncTracker.Stop();
-
-recovery = new FakePickupRecovery { Held = "Hammer" };
-recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
-recoveryReport = new SyncReport { TracesPresent = true };
-SyncTracker.BeginReplay(recoveryReport, recovery);
-SyncTracker.ReplayIssued(0, twoPickups);
-SyncTracker.OnPickup("Pliers");
-recovery.Held = "Pliers";
-SyncTracker.ReplayIssued(1, new FrameTrace());
-Check(recovery.Calls.Count == 0 && recovery.Held == "Pliers" && recoveryReport.PickupRecoverySkipped == 1,
-    "an earlier miss is skipped when a later recorded item was already picked naturally");
-SyncTracker.Stop();
-
-recovery = new FakePickupRecovery { Held = "Hammer" };
-recovery.Known.UnionWith(new[] { "Pliers", "Hammer", "Key" });
-recoveryReport = new SyncReport { TracesPresent = true };
-SyncTracker.BeginReplay(recoveryReport, recovery);
-SyncTracker.ReplayIssued(0, twoPickups);
-SyncTracker.OnPickup("Pliers");
-SyncTracker.OnPickup("Hammer");
-SyncTracker.ReplayIssued(1, new FrameTrace());
-Check(recovery.Calls.SequenceEqual(new[] { "Pliers" }) && recovery.Held == "Pliers",
-    "reverse natural pickup order is repaired to the recorded terminal held item");
-SyncTracker.Stop();
-
-var unknownTrace = new FrameTrace();
-unknownTrace.Pickups.Add("Unknown item");
-unknownTrace.Pickups.Add("Pliers");
-recovery = new FakePickupRecovery();
-recovery.Known.Add("Pliers");
-recoveryReport = new SyncReport { TracesPresent = true };
-SyncTracker.BeginReplay(recoveryReport, recovery);
-SyncTracker.ReplayIssued(0, unknownTrace);
-SyncTracker.ReplayIssued(1, new FrameTrace());
-Check(recovery.Calls.SequenceEqual(new[] { "Unknown item" }) && recovery.Mutations == 0 &&
-      recoveryReport.PickupRecoveryFailures == 1 && recoveryReport.PickupRecoverySkipped == 1,
-    "an unknown item fails before mutation and stops the frame recovery transaction");
-SyncTracker.Stop();
-
-recovery = new FakePickupRecovery();
-recovery.Known.Add("Pliers");
-recoveryReport = new SyncReport { TracesPresent = true };
-SyncTracker.BeginReplay(recoveryReport, recovery);
-SyncTracker.ReplayIssued(7, pliersTrace);
-SyncTracker.CompleteReplay();
-Check(recovery.Calls.SequenceEqual(new[] { "Pliers" }) && recoveryReport[SyncReport.Area.Pickups].FirstFrame == 7,
-    "natural replay completion compares and recovers the final frame pickup window");
-SyncTracker.Stop();
-
-recovery = new FakePickupRecovery();
-recovery.Known.Add("Pliers");
-SyncTracker.BeginReplay(new SyncReport { TracesPresent = true }, recovery);
-SyncTracker.ReplayIssued(0, pliersTrace);
-SyncTracker.Stop();
-Check(recovery.Calls.Count == 0, "manual stop resets a partial pickup window without forcing it");
-SyncTracker.BeginReplay(new SyncReport { TracesPresent = false }, recovery);
-SyncTracker.ReplayIssued(0, pliersTrace);
-SyncTracker.ReplayIssued(1, new FrameTrace());
-Check(recovery.Calls.Count == 0, "legacy macros without traces never run pickup recovery");
-SyncTracker.Stop();
-Check(recoveryReport.Lines().Any(line => line.Contains("missed pickups")),
-    "the sync report lists pickup recovery outcomes");
-
-// ---- native generic pickup recovery boundary --------------------------------------
-var inventoryObject = new GameObject();
-var liveInventory = inventoryObject.AddComponent<Il2Cpp.Inventory>();
-var handObject = new GameObject();
-handObject.SetActive(false);
-liveInventory.ItemDefs.Add(new Il2Cpp.ItemDefs { itemName = "Pliers", handObject = handObject });
-var livePickRay = new GameObject().AddComponent<Il2Cpp.PickRay>();
-livePickRay.Inventory = liveInventory;
-var sourceObject = new GameObject();
-sourceObject.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
-var nativeRecovery = new GamePickupRecovery();
-var nativeResult = nativeRecovery.TryRecover("Pliers");
-Check(nativeResult.Outcome == PickupRecoveryOutcome.Applied && handObject.activeSelf &&
-      !sourceObject.activeInHierarchy && livePickRay.CheckDropCalls == 1 && liveInventory.PickupCalls == 1,
-    "generic recovery follows CheckItemDropping, PickupItem, then source destruction");
-var dropsBeforeUnknown = liveInventory.DropCalls;
-Check(nativeRecovery.TryRecover("Unknown").Outcome == PickupRecoveryOutcome.Failed &&
-      liveInventory.DropCalls == dropsBeforeUnknown,
-    "unknown item recovery fails before destructive native calls");
-
-handObject.SetActive(false);
-var duplicateSourceA = new GameObject();
-duplicateSourceA.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
-var duplicateSourceB = new GameObject();
-duplicateSourceB.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
-var pickupsBeforeAmbiguous = liveInventory.PickupCalls;
-Check(nativeRecovery.TryRecover("Pliers").Outcome == PickupRecoveryOutcome.Failed &&
-      liveInventory.PickupCalls == pickupsBeforeAmbiguous && duplicateSourceA.activeInHierarchy && duplicateSourceB.activeInHierarchy,
-    "ambiguous world sources fail without inventory or source mutation");
-duplicateSourceA.SetActive(false);
-duplicateSourceB.SetActive(false);
-
-handObject.SetActive(true);
-var heldSource = new GameObject();
-heldSource.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
-var pickupsBeforeHeld = liveInventory.PickupCalls;
-Check(nativeRecovery.TryRecover("Pliers").Outcome == PickupRecoveryOutcome.AlreadyHeld &&
-      liveInventory.PickupCalls == pickupsBeforeHeld && heldSource.activeInHierarchy,
-    "already-held recovery is a true no-op and does not guess which world source to destroy");
-Check(nativeRecovery.TryRecover("b").Outcome == PickupRecoveryOutcome.Failed &&
-      liveInventory.PickupCalls == pickupsBeforeHeld,
-    "the unmodeled special shotgun branch is rejected before native calls");
-heldSource.SetActive(false);
-
-handObject.SetActive(false);
-Check(nativeRecovery.TryRecover("Pliers").Outcome == PickupRecoveryOutcome.Applied &&
-      handObject.activeSelf,
-    "a missing world source still allows the recorded item into the hand");
-
-handObject.SetActive(false);
-UnityEngine.Object.DeferDestroy = true;
-var deferredSource = new GameObject();
-deferredSource.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
-Check(nativeRecovery.TryRecover("Pliers").Outcome == PickupRecoveryOutcome.Applied &&
-      deferredSource.activeInHierarchy,
-    "source destruction can be deferred by the engine");
-handObject.SetActive(false);
-var replacementSource = new GameObject();
-replacementSource.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
-Check(nativeRecovery.TryRecover("Pliers").Outcome == PickupRecoveryOutcome.Applied &&
-      UnityEngine.Object.PendingDestroy.Contains(replacementSource),
-    "a consumed source is ignored until deferred destruction completes");
-UnityEngine.Object.FlushDestroy();
-UnityEngine.Object.DeferDestroy = false;
-handObject.SetActive(false);
-
 // ---- interaction ray pin ------------------------------------------------------------------
 var rayPlayer = new Il2Cpp.MobileFPS();
 var rayFall = rayPlayer.gameObject.AddComponent<Il2Cpp.FallingHolder>();
@@ -1166,6 +984,293 @@ Time.deltaTime = 0;
 InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick));
 InteractionPin.After();
 Check(pick.transform.SetPoseCalls == setPosesBefore, "frozen frames never pin");
+
+// ---- recorded pickups: steering, click, forcing ----------------------------------------------
+// Recorded: the pickup ray hit "Pliers" and the game picked it up. Replay: the
+// ray is on the recorded pose, but the pliers sit 3 cm to the side, so it
+// hits the drawer behind them.
+Time.deltaTime = 1f / 60f;
+var steerInventory = new GameObject().AddComponent<Il2Cpp.Inventory>();
+var pliersHand = new GameObject();
+pliersHand.SetActive(false);
+steerInventory.ItemDefs.Add(new Il2Cpp.ItemDefs { itemName = "Pliers", handObject = pliersHand });
+pick.Inventory = steerInventory;
+var pliers = new GameObject { name = "Pliers" };
+pliers.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Pliers";
+pliers.AddComponent<Collider>().Extents = new Vector3(.05f, .05f, .05f);
+var pliersAside = new Vector3(1.03f, 1.6f, 1.8f);
+var pliersLocal = new Vector3(.03f, 0, .3f);
+void PlacePliers(Vector3 world)
+{
+    Time.frameCount++; // each scenario is its own engine frame
+    pliers.SetActive(true);
+    pliers.transform.position = world;
+    pliers.transform.localPosition = pliersLocal;
+}
+// What the game's own PickRay.Update does on a cast that reaches the item with a click.
+void GamePickup()
+{
+    if (!pick.buttonClicked || Physics.HitAt(pick.transform.position) != "Pliers") return;
+    pick.buttonClicked = false;
+    steerInventory.PickupItem("Pliers");
+}
+PlacePliers(pliersAside);
+Physics.HitAt = origin => Same(pliers.transform.position.x, origin.x) ? "Pliers" : "Drawer";
+Physics.HitDistance = 1f;
+pick.transform.position = new Vector3(1f, 1.6f, 1f);
+pick.transform.rotation = Quaternion.identity;
+var pickupTrace = new FrameTrace();
+pickupTrace.Rays.Add(new RaySample { Kind = RaySample.Pick, Position = pick.transform.position, Rotation = pick.transform.rotation, Hit = "Pliers" });
+pickupTrace.Pickups.Add("Pliers");
+var lookTrace = new FrameTrace();
+lookTrace.Rays.Add(pickupTrace.Rays[0].Clone());
+
+var steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, pickupTrace);
+var pliersPoses = pliers.transform.SetPoseCalls;
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+var hitDuringCall = Physics.HitAt(pick.transform.position);
+var clickedDuringCall = pick.buttonClicked;
+GamePickup();
+InteractionPin.After(pick);
+Check(hitDuringCall == "Pliers" && pliers.transform.SetPoseCalls == pliersPoses + 1 && steerReport.ItemSteers == 1,
+    "a recorded item just off the pinned ray is put under it for the game's own pickup");
+Check(clickedDuringCall && steerReport.ClickPins == 1 && steerReport.ForcedPickups == 0 && pliersHand.activeSelf,
+    "with no ring left by the previous cast, the recorded click is handed to the game, which then picks the item up");
+Check(Bits.Same(pliers.transform.localPosition, pliersLocal) && !pick.buttonClicked,
+    "the steered item is put back and the click cleared when the call ends");
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(steerReport[SyncReport.Area.Pickups].Differing == 0 && steerReport[SyncReport.Area.EffectiveRayHit].Differing == 1,
+    "the pickup happens on the recorded frame, and the report still shows the ray missed before steering");
+Check(steerReport.Lines().Any(l => l.Contains("pickup items") && l.Contains(" 1 ")) &&
+      steerReport.Lines().Any(l => l.Contains("'Pliers' moved 3.0 cm")) &&
+      steerReport.Lines().Any(l => l.Contains("pickup clicks") && l.Contains(" 1 ")),
+    "the report counts the steer and the click, and says how far the item was moved");
+SyncTracker.Stop();
+
+PlacePliers(pliersAside);
+pliersHand.SetActive(false);
+var ring = new GameObject();
+pick.Ring = ring;
+VirtualInput.Previous.Clear();
+VirtualInput.Current.Clear();
+VirtualInput.Current.Keys.Add(KeyCode.E);
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, pickupTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+var clickedWithRing = pick.buttonClicked;
+pick.buttonClicked = true; // the game's own gate passes
+GamePickup();
+InteractionPin.After(pick);
+Check(!clickedWithRing && steerReport.ClickPins == 0 && steerReport.ItemSteers == 1 && pliersHand.activeSelf,
+    "a click the game accepts by itself (ring showing, interact edge) is left to the game");
+SyncTracker.Stop();
+
+// The replay is in sync: the cast hits the recorded item and the ring is up.
+PlacePliers(new Vector3(1f, 1.6f, 1.8f));
+pliersHand.SetActive(false);
+pliersPoses = pliers.transform.SetPoseCalls;
+var syncsInSync = Physics.SyncCalls;
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, pickupTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+var clickedInSync = pick.buttonClicked;
+pick.buttonClicked = true; // the game's own gate passes
+GamePickup();
+InteractionPin.After(pick);
+Check(!clickedInSync && pliers.transform.SetPoseCalls == pliersPoses && Physics.SyncCalls == syncsInSync &&
+      steerReport.ItemSteers + steerReport.ClickPins + steerReport.FlagPins + steerReport.ForcedPickups == 0 && pliersHand.activeSelf,
+    "an in-sync pickup cast is left entirely to the game: nothing moved, synced, clicked or forced");
+SyncTracker.Stop();
+VirtualInput.Current.Clear();
+pick.Ring = null;
+
+PlacePliers(pliersAside);
+pliersHand.SetActive(false);
+pick.WJ.IsJumping = true;
+pick.PlayerStatus.IsJumpscared = true;
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, pickupTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+var gatesOpenDuringCall = !pick.WJ.IsJumping && !pick.PlayerStatus.IsJumpscared;
+GamePickup();
+InteractionPin.After(pick);
+Check(gatesOpenDuringCall && pick.WJ.IsJumping && pick.PlayerStatus.IsJumpscared && steerReport.FlagPins == 1 &&
+      steerReport.ForcedPickups == 0,
+    "the jump and jumpscare gates are opened for the recorded pickup's cast only");
+SyncTracker.Stop();
+pick.WJ.IsJumping = false;
+pick.PlayerStatus.IsJumpscared = false;
+
+PlacePliers(pliersAside);
+pliersPoses = pliers.transform.SetPoseCalls;
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, lookTrace);
+var syncsBeforeLook = Physics.SyncCalls;
+var picksBeforeLook = steerInventory.PickupCalls;
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+var clickedOnLook = pick.buttonClicked;
+InteractionPin.After(pick);
+Check(pliers.transform.SetPoseCalls == pliersPoses && Physics.SyncCalls == syncsBeforeLook && steerReport.ItemSteers == 0 &&
+      !clickedOnLook && steerInventory.PickupCalls == picksBeforeLook,
+    "an item the recording only looked at is never moved, clicked or picked up");
+SyncTracker.ReplayIssued(1, pickupTrace);
+SyncTracker.OnPickup("Pliers");
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+InteractionPin.After(pick);
+Check(pliers.transform.SetPoseCalls == pliersPoses && steerReport.ItemSteers == 0 && steerInventory.PickupCalls == picksBeforeLook,
+    "an item the replay already picked up in that frame is not steered or forced again");
+SyncTracker.Stop();
+
+PlacePliers(new Vector3(1.4f, 1.6f, 1.8f));
+pliersHand.SetActive(false);
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, pickupTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+var farHit = Physics.HitAt(pick.transform.position);
+GamePickup();
+InteractionPin.After(pick);
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(farHit == "Pliers" && steerReport.ItemSteers == 1 && steerReport.ForcedPickups == 0 &&
+      steerReport[SyncReport.Area.Pickups].Differing == 0 && steerReport.Lines().Any(l => l.Contains("'Pliers' moved 40.0 cm")),
+    "an item far off the ray is still put under it for the game's pickup: there is no distance limit");
+SyncTracker.Stop();
+
+// The game's call takes nothing (its ray stops on something the mod cannot
+// see, the frame is paused, ...): the pickup is made right after the call.
+PlacePliers(pliersAside);
+pliersHand.SetActive(false);
+var picksBeforeForce = steerInventory.PickupCalls;
+var dropsBeforeForce = pick.CheckDropCalls;
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, pickupTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+InteractionPin.After(pick);
+Check(steerInventory.PickupCalls == picksBeforeForce + 1 && pick.CheckDropCalls == dropsBeforeForce + 1 &&
+      pliersHand.activeSelf && !pliers.activeInHierarchy && steerReport.ForcedPickups == 1 && !pick.buttonClicked,
+    "a recorded pickup the game's call still missed is forced after it: held item dropped, item in hand, world copy destroyed");
+SyncTracker.ReplayIssued(1, new FrameTrace());
+Check(steerReport[SyncReport.Area.Pickups].Differing == 1 && steerReport[SyncReport.Area.Pickups].WorstNote.Contains("forced [Pliers]") &&
+      steerReport.Lines().Any(l => l.Contains("forced pickups") && l.Contains(" 1 ")),
+    "a forced pickup is still reported as the miss it was, and counted as a correction");
+SyncTracker.Stop();
+
+PlacePliers(pliersAside);
+pliersHand.SetActive(false);
+pliersPoses = pliers.transform.SetPoseCalls;
+Physics.HitAt = _ => "Drawer";
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, pickupTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+var poseAfterFailedSteer = pliers.transform.localPosition;
+var clickedAfterFailedSteer = pick.buttonClicked;
+InteractionPin.After(pick);
+Check(pliers.transform.SetPoseCalls == pliersPoses + 1 && Bits.Same(poseAfterFailedSteer, pliersLocal) && !clickedAfterFailedSteer &&
+      steerReport.ItemSteers == 0 && steerReport.Lines().Any(l => l.Contains("still missed it")),
+    "a move that still does not put the item under the ray is undone before the game casts, and no click goes to what it hits");
+Check(steerReport.ForcedPickups == 1 && pliersHand.activeSelf && !pliers.activeInHierarchy,
+    "an item that could not be steered under the ray is still picked up on its recorded frame");
+SyncTracker.Stop();
+
+PlacePliers(pliersAside);
+pliersHand.SetActive(false);
+var twoCastTrace = new FrameTrace();
+twoCastTrace.Rays.Add(pickupTrace.Rays[0].Clone());
+twoCastTrace.Rays.Add(pickupTrace.Rays[0].Clone());
+twoCastTrace.Pickups.Add("Pliers");
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, twoCastTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+InteractionPin.After(pick);
+var forcedAfterFirstCast = steerReport.ForcedPickups;
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+InteractionPin.After(pick);
+Check(forcedAfterFirstCast == 0 && steerReport.ForcedPickups == 1,
+    "a pickup is forced only after the recording's last pickup cast of that frame");
+SyncTracker.Stop();
+
+pliers.SetActive(false);
+pliersHand.SetActive(false);
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, pickupTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+InteractionPin.After(pick);
+Check(pliersHand.activeSelf && steerReport.ForcedPickups == 1 && steerReport.Lines().Any(l => l.Contains("no copy was left in the world")),
+    "a recorded item with no world copy left on replay is still put in hand, and the report says so");
+SyncTracker.Stop();
+var picksWhileHeld = steerInventory.PickupCalls;
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, pickupTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+InteractionPin.After(pick);
+Check(steerInventory.PickupCalls == picksWhileHeld && steerReport.ForceFailures == 1 && steerReport.Lines().Any(l => l.Contains("already in hand")),
+    "an item already in hand with no world copy left is not taken a second time");
+SyncTracker.Stop();
+
+steerInventory.ItemDefs.Add(new Il2Cpp.ItemDefs { itemName = "Shotgun", handObject = pick.H_SG });
+pick.H_SG.SetActive(false);
+var shotgun = new GameObject { name = "Shotgun" };
+shotgun.AddComponent<Il2Cpp.ItemSeedData>().itemName = "Shotgun";
+shotgun.AddComponent<Collider>().Extents = new Vector3(.3f, .1f, .1f);
+shotgun.transform.position = new Vector3(5f, 1f, 5f);
+var shotgunTrace = new FrameTrace();
+shotgunTrace.Rays.Add(pickupTrace.Rays[0].Clone());
+shotgunTrace.Pickups.Add("Shotgun");
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, shotgunTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+InteractionPin.After(pick);
+Check(pick.ShotgunCalls == 1 && pick.H_SG.activeSelf && !shotgun.activeInHierarchy && steerReport.ForcedPickups == 1,
+    "a forced shotgun pickup runs the game's shotgun follow-up");
+SyncTracker.Stop();
+
+var syncMark = Physics.SyncCalls;
+Physics.HitAt = _ => Physics.SyncCalls > syncMark ? "Pliers" : "Drawer";
+PlacePliers(pliersAside);
+pliersHand.SetActive(false);
+pliersPoses = pliers.transform.SetPoseCalls;
+steerReport = new SyncReport { TracesPresent = true };
+SyncTracker.BeginReplay(steerReport);
+SyncTracker.ReplayIssued(0, pickupTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+GamePickup();
+InteractionPin.After(pick);
+Check(pliers.transform.SetPoseCalls == pliersPoses && steerReport.ItemSteers == 1 && steerReport.ForcedPickups == 0 &&
+      steerReport.Lines().Any(l => l.Contains("syncing its collider")),
+    "an item whose collider only lagged its transform is reached by a sync, without moving it");
+SyncTracker.Stop();
+
+Physics.HitAt = origin => Same(pliers.transform.position.x, origin.x) ? "Pliers" : "Drawer";
+PlacePliers(pliersAside);
+pliersHand.SetActive(false);
+pliersPoses = pliers.transform.SetPoseCalls;
+var picksMeasureOnly = steerInventory.PickupCalls;
+InteractionPin.Enabled = false;
+SyncTracker.BeginReplay(new SyncReport { TracesPresent = true });
+SyncTracker.ReplayIssued(0, pickupTrace);
+InteractionPin.Before(RaySample.Pick, pick, pick.Player, InteractionPin.PickDistance(pick), InteractionPin.PickReach(pick));
+var clickedMeasureOnly = pick.buttonClicked;
+InteractionPin.After(pick);
+SyncTracker.Stop();
+InteractionPin.Enabled = true;
+Check(pliers.transform.SetPoseCalls == pliersPoses && !clickedMeasureOnly && steerInventory.PickupCalls == picksMeasureOnly,
+    "measure-only replays never move items, click, or force pickups");
+pliers.SetActive(false);
+Physics.HitDistance = 0f;
+Time.deltaTime = 0;
+
 Physics.HitAt = _ => null;
 VirtualInput.Active = false;
 
@@ -1213,6 +1318,27 @@ rigChild.transform.name = "Renamed";
 rigChild.transform.localPosition = Vector3.zero;
 rigCopy.Restore(rigPlayer);
 Check(Same(rigChild.transform.localPosition.y, 0f), "a rig transform that is no longer the same object is left alone");
+
+// The game reports finished clips as enabled with no weight. Put back as
+// "enabled at time 0" they play out and write their end pose mid-replay (the
+// crouch pair left every replay at height 1.8 with the camera a metre down).
+var crouchAnim = new Animation();
+crouchAnim.States.Add(new AnimationState { name = "PlayerHukarSig", enabled = true, weight = 0f, time = 0f, speed = 1 });
+crouchAnim.States.Add(new AnimationState { name = "PlayerReserSig", enabled = true, weight = 0f, time = 0f, speed = 1 });
+rigCrouch.Anim = crouchAnim;
+var idleRig = PlayerRigSnapshot.Capture(rigPlayer);
+crouchAnim.States[0].enabled = false;
+crouchAnim.States[0].time = .1f;
+crouchAnim.States[1].weight = .5f;
+crouchAnim.States[1].time = .2f;
+var samplesBefore = crouchAnim.SampleCalls;
+var idleNote = idleRig.Restore(rigPlayer);
+Check(!crouchAnim.States[0].enabled && Same(crouchAnim.States[0].time, .1f),
+    "an animation state the recording had no weight on is not re-armed on replay");
+Check(!crouchAnim.States[1].enabled && Same(crouchAnim.States[1].weight, 0f) && crouchAnim.SampleCalls == samplesBefore + 1,
+    "a state shaping the replay's pose that the recording had no weight on is silenced");
+Check(idleNote.Contains("idle left alone"), "the rig note says how many idle states were left alone");
+rigCrouch.Anim = null;
 
 // ---- phase alignment ------------------------------------------------------------------------
 // A minimal Unity clock: the frame delta is captureDeltaTime * timeScale, the
