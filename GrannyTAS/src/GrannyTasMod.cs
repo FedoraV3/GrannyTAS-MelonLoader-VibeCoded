@@ -45,6 +45,7 @@ namespace GrannyTAS
             Config.ApplyTo(Time);
 
             PickupDiagnostics.Log = LoggerInstance;
+            EnemyEsp.Warn = msg => LoggerInstance.Warning(msg);
             VirtualInput.PinPosition = Config.PinPlaybackPosition;
             InteractionPin.Enabled = Config.PinInteractionRays;
             PickupDiagnostics.Enabled = Config.PickupTrace;
@@ -113,6 +114,13 @@ namespace GrannyTAS
             }
             finally { VirtualInput.Bypass = false; }
 
+            // A snapshot load or a restarting replay keeps input frozen through
+            // the reload, which also swallowed the game's own B-to-speed-up the
+            // wake-up. That key alone goes through while the bed animation
+            // plays; it runs before any frame is replayed, so it cannot touch
+            // the run.
+            VirtualInput.PassWakeUpKey = Macro.Mode == MacroMode.Preparing && PlayerGate.InWakeUp;
+
             // The panel owns the cursor and the mouse for as long as it is open,
             // whether or not the timing layer is engaged — it is reachable from
             // the main menu too.
@@ -165,6 +173,14 @@ namespace GrannyTAS
             {
                 VirtualInput.Freeze();
                 return;
+            }
+
+            // A snapshot load has replayed its last kept frame: recording
+            // resumes here, paused, so the snapshot frame is the next one taken.
+            if (Macro.TakeRewindHandoff())
+            {
+                Time.SetPaused(true);
+                VirtualInput.ClearBuffer();
             }
 
             var simulating = Time.OnUpdate();
@@ -223,6 +239,7 @@ namespace GrannyTAS
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
         {
             PlayerGate.Invalidate();
+            EnemyEsp.Invalidate();
             Macro?.NotifySceneLoaded(sceneName);
         }
 
@@ -276,6 +293,14 @@ namespace GrannyTAS
                 // loss (death, startup, teardown, probe errors) still stops.
                 var macroActive = Macro.Mode == MacroMode.Recording || Macro.Mode == MacroMode.Playing;
                 if (macroActive && PlayerGate.CanBridgeTransientControlLoss) return;
+
+                // Caught with an armed snapshot: rewind instead of ending the take.
+                // The rewind restarts the level itself, so nothing below applies.
+                if (Macro.Mode == MacroMode.Recording && PlayerGate.PlayerCaught && Macro.TryAutoLoadSnapshot())
+                {
+                    VirtualInput.Active = false;
+                    return;
+                }
 
                 if (Macro.Mode == MacroMode.Recording) Macro.StopRecording();
                 if (Macro.Mode == MacroMode.Playing || Macro.Mode == MacroMode.Aligning)
@@ -384,6 +409,10 @@ namespace GrannyTAS
             if (textInputActive) return;
 
             HandleSettingsKeys();
+
+            // After a death without an armed snapshot the recording has stopped
+            // and control is gone — exactly when loading the snapshot is wanted.
+            if (Keybinds.Down(TasAction.LoadSnapshot)) Macro.LoadSnapshot();
         }
 
         private void HandleHotkeys()
@@ -403,6 +432,9 @@ namespace GrannyTAS
 
             if (Keybinds.Down(TasAction.Record)) ToggleRecord();
             if (Keybinds.Down(TasAction.Play)) TogglePlay();
+
+            if (Keybinds.Down(TasAction.SaveSnapshot)) Macro.SaveSnapshot();
+            if (Keybinds.Down(TasAction.LoadSnapshot)) Macro.LoadSnapshot();
         }
 
         /// <summary>
@@ -413,6 +445,9 @@ namespace GrannyTAS
         /// </summary>
         private void HandleSettingsKeys()
         {
+            // Display only, so it belongs with the keys that work in any state.
+            if (Keybinds.Down(TasAction.ToggleEsp)) Config.ShowEsp = !Config.ShowEsp;
+
             if (Keybinds.Down(TasAction.TickRateDown)) Time.SetTickRate(Time.TickRate - 10f);
             if (Keybinds.Down(TasAction.TickRateUp)) Time.SetTickRate(Time.TickRate + 10f);
 
@@ -454,27 +489,40 @@ namespace GrannyTAS
             // Repaint, so everything happens there.
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
 
-            if (_imgui != null && _imgui.Visible && !_imgui.Failed)
+            // The ESP draws with the panel closed too, so an ImGui frame runs
+            // whenever either wants one. The panel list reads the same data,
+            // which is why gathering also happens with only the panel up.
+            var panel = _imgui != null && _imgui.Visible;
+            var esp = Config.ShowEsp;
+            if (esp || panel) EnemyEsp.Gather();
+
+            if (_imgui != null && (panel || esp) && !_imgui.Failed)
             {
                 if (_imgui.Initialize())
                 {
                     _imgui.NewFrame(UnityEngine.Time.unscaledDeltaTime);
                     if (_imgui.Ready)
                     {
-                        try { TasWindow.Draw(this); }
-                        catch (System.Exception e) { _imgui.Discard(); _imgui.ReportFailure(e.Message); }
+                        // Background draw list only, no window: cannot unbalance the stack.
+                        if (esp) EnemyEsp.Draw(Config);
+                        if (panel)
+                        {
+                            try { TasWindow.Draw(this); }
+                            catch (System.Exception e) { _imgui.Discard(); _imgui.ReportFailure(e.Message); }
+                        }
                     }
                     _imgui.Render();
-                    if (!_imgui.Failed) return;
+                    if (panel && !_imgui.Failed) return;
                 }
 
                 // Initialisation failed; fall through to the legacy overlay so
                 // the user is not left without an interface.
-                SetPanelVisible(false);
+                if (panel) SetPanelVisible(false);
             }
 
             if (_imgui?.Failed == true && PanelVisible) SetPanelVisible(false);
 
+            if (esp && (_imgui == null || _imgui.Failed)) EnemyEsp.DrawLegacy(_style ??= MakeStyle());
             DrawLegacyOverlay();
         }
 
@@ -527,7 +575,9 @@ namespace GrannyTAS
                 case MacroMode.Recording:
                     return $"<color=#ff6666>REC</color> {Macro.FrameCount}";
                 case MacroMode.Playing:
-                    return $"<color=#66ff66>PLAY</color> {Macro.Playhead}/{Macro.FrameCount}";
+                    return Macro.IsRewinding
+                        ? $"<color=#ffcc00>REWIND</color> {Macro.Playhead}/{Macro.FrameCount}"
+                        : $"<color=#66ff66>PLAY</color> {Macro.Playhead}/{Macro.FrameCount}";
                 case MacroMode.Preparing:
                     return "<color=#ffcc00>PREPARING</color>";
                 case MacroMode.Aligning:

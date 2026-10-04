@@ -90,6 +90,12 @@ namespace GrannyTAS
 
         public static Flags Current { get; private set; }
 
+        /// <summary>The player has been caught or killed, as of the last probe.</summary>
+        public static bool PlayerCaught => Current.HasPlayer && !Current.NotJumpscared;
+
+        /// <summary>The bed wake-up animation is playing, as of the last probe.</summary>
+        public static bool InWakeUp => Current.HasPlayer && !Current.IntroFinished;
+
         /// <summary>
         /// True once the player has been demonstrably in control for
         /// <see cref="SettleFrames"/> frames. Poll once per real frame.

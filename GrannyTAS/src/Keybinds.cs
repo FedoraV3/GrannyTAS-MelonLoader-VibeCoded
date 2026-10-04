@@ -9,6 +9,7 @@ namespace GrannyTAS
     public enum TasAction
     {
         TogglePanel,
+        ToggleEsp,
         Pause,
         Step,
         Step10,
@@ -20,6 +21,8 @@ namespace GrannyTAS
         ClearBuffer,
         Record,
         Play,
+        SaveSnapshot,
+        LoadSnapshot,
     }
 
     /// <summary>
@@ -69,6 +72,7 @@ namespace GrannyTAS
             Map.Clear();
             Ordered.Clear();
             Define(cfg, TasAction.TogglePanel, "Toggle panel", KeyCode.Insert);
+            Define(cfg, TasAction.ToggleEsp, "Toggle enemy ESP", KeyCode.F1);
             Define(cfg, TasAction.Pause, "Pause / resume", KeyCode.F2);
             Define(cfg, TasAction.Step, "Step 1 frame", KeyCode.F3);
             Define(cfg, TasAction.Step10, "Step 10 frames", KeyCode.F4);
@@ -80,6 +84,8 @@ namespace GrannyTAS
             Define(cfg, TasAction.ClearBuffer, "Clear input buffer", KeyCode.F10);
             Define(cfg, TasAction.Record, "Record", KeyCode.F11);
             Define(cfg, TasAction.Play, "Play", KeyCode.F12);
+            Define(cfg, TasAction.SaveSnapshot, "Save snapshot (arms auto-load)", KeyCode.Home);
+            Define(cfg, TasAction.LoadSnapshot, "Load snapshot", KeyCode.End);
         }
 
         private static void Define(MelonPreferences_Category cfg, TasAction action, string label, KeyCode def)

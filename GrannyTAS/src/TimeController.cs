@@ -276,7 +276,7 @@ namespace GrannyTAS
         /// macro is indexed by frame number, so the counter on screen is only
         /// meaningful if it agrees with the index being written.
         /// </summary>
-        public void ResetFrameCount() => FrameCount = 0;
+        public void ResetFrameCount(int to = 0) => FrameCount = to;
 
         public void SetTickRate(float ticksPerSecond)
         {

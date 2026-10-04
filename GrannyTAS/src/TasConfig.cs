@@ -36,6 +36,11 @@ namespace GrannyTAS
         private MelonPreferences_Entry<bool> _pickupTrace;
         private MelonPreferences_Entry<bool> _pinPlaybackPosition;
         private MelonPreferences_Entry<bool> _pinInteractionRays;
+        private MelonPreferences_Entry<bool> _showEsp;
+        private MelonPreferences_Entry<bool> _espRadar;
+        private MelonPreferences_Entry<bool> _espPaths;
+        private MelonPreferences_Entry<bool> _espVision;
+        private MelonPreferences_Entry<float> _espRadarRange;
         private MelonPreferences_Entry<float> _tickRate;
         private MelonPreferences_Entry<float> _physicsRate;
         private MelonPreferences_Entry<float> _speed;
@@ -98,6 +103,45 @@ namespace GrannyTAS
             set { if (_pickupTrace.Value != value) { _pickupTrace.Value = value; MarkDirty(); } }
         }
 
+        /// <summary>
+        /// Draw where every enemy is — see <see cref="EnemyEsp"/>. Display only:
+        /// it reads the world and never changes it, so it has no effect on what
+        /// a macro records or how it replays.
+        /// </summary>
+        public bool ShowEsp
+        {
+            get => _showEsp.Value;
+            set { if (_showEsp.Value != value) { _showEsp.Value = value; MarkDirty(); } }
+        }
+
+        /// <summary>Top-down radar of enemies around the player, forward up.</summary>
+        public bool EspRadar
+        {
+            get => _espRadar.Value;
+            set { if (_espRadar.Value != value) { _espRadar.Value = value; MarkDirty(); } }
+        }
+
+        /// <summary>Each enemy's remaining nav path, in the world and on the radar.</summary>
+        public bool EspPaths
+        {
+            get => _espPaths.Value;
+            set { if (_espPaths.Value != value) { _espPaths.Value = value; MarkDirty(); } }
+        }
+
+        /// <summary>Enemy vision cones on the radar.</summary>
+        public bool EspVision
+        {
+            get => _espVision.Value;
+            set { if (_espVision.Value != value) { _espVision.Value = value; MarkDirty(); } }
+        }
+
+        /// <summary>Metres from the player to the radar's edge.</summary>
+        public float EspRadarRange
+        {
+            get => _espRadarRange.Value;
+            set { if (!Approximately(_espRadarRange.Value, value)) { _espRadarRange.Value = value; MarkDirty(); } }
+        }
+
         /// <summary>Whether an open panel swallows mouse look and clicks — see <see cref="CursorController"/>.</summary>
         public bool SuppressLookWithPanel
         {
@@ -147,7 +191,17 @@ namespace GrannyTAS
             _pinPlaybackPosition = _cat.CreateEntry("PinPlaybackPosition", true,
                 description: "On playback, put the player back on the recorded position each frame so interaction rays stay on target.");
             _pinInteractionRays = _cat.CreateEntry("PinInteractionRays", true,
-                description: "On playback, cast pickup/door rays from exactly where they were cast when recording, and make every recorded pickup happen on its recorded frame: the item is steered under the ray and the click handed over, and an item the game still misses is picked up right after its cast (measured either way).");
+                description: "On playback, cast pickup/door rays from exactly where they were cast when recording (measured either way).");
+            _showEsp = _cat.CreateEntry("ShowEsp", true,
+                description: "Show where enemies are (boxes, labels, off-screen arrows). Display only; never affects a run.");
+            _espRadar = _cat.CreateEntry("EspRadar", true,
+                description: "Top-down enemy radar in the top-right corner.");
+            _espPaths = _cat.CreateEntry("EspPaths", true,
+                description: "Draw each enemy's remaining nav path.");
+            _espVision = _cat.CreateEntry("EspVision", true,
+                description: "Draw enemy vision cones on the radar.");
+            _espRadarRange = _cat.CreateEntry("EspRadarRange", 30f,
+                description: "Radar range in metres.");
 
             _tickRate = _cat.CreateEntry("TickRate", 60f,
                 description: "Simulated frames per second. Part of the run: changing it changes the simulation.");
@@ -238,6 +292,11 @@ namespace GrannyTAS
             _pickupTrace.ResetToDefault();
             _pinPlaybackPosition.ResetToDefault();
             _pinInteractionRays.ResetToDefault();
+            _showEsp.ResetToDefault();
+            _espRadar.ResetToDefault();
+            _espPaths.ResetToDefault();
+            _espVision.ResetToDefault();
+            _espRadarRange.ResetToDefault();
             _tickRate.ResetToDefault();
             _physicsRate.ResetToDefault();
             _speed.ResetToDefault();

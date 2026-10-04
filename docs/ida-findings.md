@@ -397,6 +397,13 @@ base is a `GetComponent<FallingHolder>()` result — **not** an
 
 State 4 is the end-of-intro marker `PlayerGate` uses.
 
+**Wake-up fast-forward (verified 2026-10-04):** `Days::Update` (`0x1801b17d0`) sets
+`Time.timeScale = 15` on `Input.GetKeyDown(KeyCode.B)` while the bed-animation
+parent is active and `!Paused.IsPaused`; the intro coroutine restores `timeScale = 1`
+after spawning the enemies. A reload under the mod (snapshot load, restarting
+replay) freezes input, so `VirtualInput.PassWakeUpKey` lets B alone through
+during that animation.
+
 **`Days.BeganDay` is not a "gameStarted" flag** — true for ~2 s during the day
 text, then false again.
 
@@ -488,3 +495,31 @@ already recommended, not because `FallSpeed` itself misbehaves.
 
 Raw evidence archived under `[[IDA:MobileFPS_FallSpeed_accumulation_20260914]]`
 in `docs/ida-raw-evidence.txt`.
+
+## Enemy door opening — `AI_Granny::FixedUpdate` / `AI_Grandpa::FixedUpdate` (verified)
+
+Decompiled 2026-10-04 (headless idat on a copy of the database; Granny at
+`0x1801bdcc0`). Both enemies share the logic and every constant. Implemented in
+`src/DoorTimer.cs`, drawn by `src/EnemyEsp.cs`.
+
+Each FixedUpdate (skipped while `CaughtPlayer` or `IsDying`):
+`Physics.Raycast(OpenDoorRay.position, OpenDoorRay.TransformDirection(forward), out hit, DoorDistance, LayerEx)`.
+A miss sets `TimerDoorOpening = 0`, `LockedDoorAttempts = 0`, `IsOpeningDoor = false`.
+A hit is classified by `hit.collider.gameObject.name`; the matching branch does
+`TimerDoorOpening = Time.deltaTime + TimerDoorOpening` (single precision; the
+fixed step inside FixedUpdate):
+
+| Collider name | Condition | Acts when | Action |
+|---|---|---|---|
+| Innerdoor, SmallDoor, MeatDoor, OldHouseWoodenDoor, OuthouseDoor, StealDoor | — | timer >= 2.0 (`TimerMaxDoor`) | `AnimatedStuff.OpenAction`, timer = 0 |
+| GarderobDoor, MetalLockerDoor | `CanOpenClosets` | timer >= 1.0; agent stopped meanwhile | `AnimatedStuff.OpenAction` |
+| Motorhuv2, ClosetDoorR2, ClosetDoorL2 | — | timer >= 0.1 | `AnimatedStuff.CloseAction` |
+| BastuDoor (sauna) | sauna state flags | timer >= 2.0 | `Sauna.OpenDoor` (locked-sauna variant rattles 0.4/0.8/1.2, `RemoveHandle` > 2.0) |
+| Backdoor | — | rattles at > 0.8 / 1.6 / 2.4, then > 4.3 | `BackdoorManage.LockedAttempt` x3, `OpenDoor` |
+| InnerdoorVind (attic) | — | same as Backdoor | `AtticDoorManage.LockedAttempt` x3, `OpenDoor` |
+| prisonDoor | `PrisondoorGranny` flags | rattles at > 0.4 / 0.8 / 1.2, then > 2.0 | `GrannyAttempts` x3, `GrannySmackDoor` |
+
+Every open action renames the GameObject (`AnimatedStuff.OpenAction`,
+`BackdoorManage.OpenDoor`, `AtticDoorManage.OpenDoor`), which is why the next
+cast stops matching. Any other hit (including closets she may not open)
+clears `IsOpeningDoor` and resets the timer.

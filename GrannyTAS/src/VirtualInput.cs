@@ -338,6 +338,23 @@ namespace GrannyTAS
         internal static bool Intercept => Active && !Bypass;
 
         /// <summary>
+        /// The game's own wake-up fast-forward key: <c>Days.Update</c> sets
+        /// <c>Time.timeScale = 15</c> on <c>GetKeyDown(B)</c> while the bed
+        /// animation runs (docs/ida-findings.md).
+        /// </summary>
+        public const KeyCode WakeUpSpeedUpKey = KeyCode.B;
+
+        /// <summary>
+        /// Let <see cref="WakeUpSpeedUpKey"/> reach the game from hardware. Set
+        /// only while a reload is waiting out the bed animation, when nothing
+        /// is being recorded or replayed and every other key stays frozen.
+        /// </summary>
+        public static bool PassWakeUpKey { get; set; }
+
+        internal static bool InterceptKey(KeyCode key) =>
+            Intercept && !(PassWakeUpKey && key == WakeUpSpeedUpKey);
+
+        /// <summary>
         /// The game's pause menu must receive live mouse clicks so its resume
         /// button remains usable. Panel mouse suppression still takes priority
         /// when the TAS window owns the pointer.
@@ -509,7 +526,7 @@ namespace GrannyTAS
         private static bool Prefix(KeyCode key, ref bool __result)
         {
             if (key == KeyCode.Escape && VirtualInput.Frozen) return true;
-            if (!VirtualInput.Intercept) return true;
+            if (!VirtualInput.InterceptKey(key)) return true;
             __result = !VirtualInput.Frozen && VirtualInput.Current.Has(key);
             return false;
         }
@@ -521,7 +538,7 @@ namespace GrannyTAS
         private static bool Prefix(KeyCode key, ref bool __result)
         {
             if (key == KeyCode.Escape && VirtualInput.Frozen) return true;
-            if (!VirtualInput.Intercept) return true;
+            if (!VirtualInput.InterceptKey(key)) return true;
             __result = VirtualInput.Down(key);
             return false;
         }
@@ -533,7 +550,7 @@ namespace GrannyTAS
         private static bool Prefix(KeyCode key, ref bool __result)
         {
             if (key == KeyCode.Escape && VirtualInput.Frozen) return true;
-            if (!VirtualInput.Intercept) return true;
+            if (!VirtualInput.InterceptKey(key)) return true;
             __result = VirtualInput.Up(key);
             return false;
         }
