@@ -50,7 +50,6 @@ namespace GrannyTAS
         private readonly MelonLogger.Instance _log;
         private readonly TimeController _time;
         private readonly IMacroGameSetup _setup;
-        private readonly IPickupRecovery _pickupRecovery;
 
         private MacroFile _macro = new MacroFile();
         private int _playhead;
@@ -171,7 +170,6 @@ namespace GrannyTAS
             _log = log;
             _time = time;
             _setup = setup ?? new MacroGameSetup();
-            _pickupRecovery = pickupRecovery ?? new GamePickupRecovery();
             RefreshSavedList();
         }
 
@@ -651,7 +649,7 @@ namespace GrannyTAS
                 RigNote = rigNote,
             };
             SyncProbe.Begin();
-            SyncTracker.BeginReplay(_report, _pickupRecovery);
+            SyncTracker.BeginReplay(_report);
 
             _playhead = 0;
             _time.ResetFrameCount();

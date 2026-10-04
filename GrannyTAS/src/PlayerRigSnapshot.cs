@@ -25,6 +25,11 @@ namespace GrannyTAS
     /// geometry, and the movement/fall/crouch scalars. Running coroutines (a
     /// crouch half-way through its transition) are not restorable; the log
     /// says so when that is the case.
+    ///
+    /// Only animation states with weight are restored. The crouch, landing and
+    /// camera clips animate the controller's height and the camera rig
+    /// directly, and an idle one put back as "enabled at time 0" plays out and
+    /// writes its end pose a fraction of a second into the replay.
     /// </summary>
     public sealed class PlayerRigSnapshot
     {
@@ -268,6 +273,7 @@ namespace GrannyTAS
                 catch { missing++; }
             }
 
+            var idle = 0;
             foreach (var (key, get) in AnimationOwners)
             {
                 Animation anim;
@@ -282,12 +288,34 @@ namespace GrannyTAS
                     {
                         var s = anim[state.Name];
                         if (s == null) { missing++; continue; }
-                        s.enabled = state.Enabled;
-                        s.weight = state.Weight;
-                        s.time = state.Time;
-                        s.speed = state.Speed;
+
+                        if (!(state.Weight > 0f))
+                        {
+                            // A state with no weight did not shape the recorded
+                            // pose, and writing it would re-arm its clip from
+                            // time 0: the game reports every finished clip as
+                            // enabled, and a re-armed clip writes its end pose
+                            // when it runs out, weight or not. Every replay did
+                            // this 0.25 s in, when the two crouch clips ended
+                            // and left the controller at 1.8 (their blend of
+                            // 2.45 and 1.15) with the camera a metre down. Only
+                            // a state shaping the replay's pose is silenced.
+                            if (s.enabled && s.weight > 0f)
+                            {
+                                s.weight = 0f;
+                                s.enabled = false;
+                                touched = true;
+                            }
+                            idle++;
+                            continue;
+                        }
+
+                        // Written only when different, like everything else.
+                        if (s.enabled != state.Enabled) { s.enabled = state.Enabled; touched = true; }
+                        if (!Bits.Same(s.weight, state.Weight)) { s.weight = state.Weight; touched = true; }
+                        if (!Bits.Same(s.time, state.Time)) { s.time = state.Time; touched = true; }
+                        if (!Bits.Same(s.speed, state.Speed)) { s.speed = state.Speed; touched = true; }
                         states++;
-                        touched = true;
                     }
                     catch { missing++; }
                 }
@@ -303,6 +331,7 @@ namespace GrannyTAS
             var crouchNote = "";
             if (WasTrue("crouch.isCrouching")) crouchNote = " (a crouch transition was in progress when recording began; its coroutine cannot be restored)";
             return $"player rig: {values} values, {poses} transforms, {states} animation states restored" +
+                   (idle > 0 ? $" ({idle} idle left alone)" : "") +
                    (missing > 0 ? $", {missing} not found" : "") + crouchNote;
         }
 

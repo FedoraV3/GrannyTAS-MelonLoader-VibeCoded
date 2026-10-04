@@ -1,5 +1,17 @@
 # Missed generic pickup recovery
 
+> **Superseded 2026-09-30, reinstated in part 2026-10-04.** The adapter
+> described in the "recovery contract" below (`GamePickupRecovery`) put the
+> item in the hand a frame late and was removed. Replay now first makes the
+> game's own `PickRay.Update` take the item (steer it under the ray, open the
+> gates, hand over the click). If that call still misses it, the same native
+> sequence is run **in that call's postfix, on the recorded frame**
+> (`InteractionPin.ForcePending`). The world copy is chosen nearest the
+> recorded ray instead of requiring a unique name. See docs/replay-sync.md,
+> "Missed item pickups". The native-path findings in this file are still
+> accurate. `Inventory.PickupItem` and `PickRay.PickShotgun` each have exactly
+> one caller (interop `CallerCount = 1`, `PickRay.Update`).
+
 ## purpose
 
 Document the native generic-item pickup path in Granny Legacy 1.8.9 for macro

@@ -85,7 +85,7 @@ become visible to the pickup ray.
 | `src/SyncProbe.cs` / `src/RandomProbe.cs` | Read-only capture of a `FrameTrace` at a frame boundary; `Random.state` via its icall |
 | `src/SyncTracker.cs` | Attributes rays and pickups between frames to the macro frame they belong to |
 | `src/SyncReport.cs` | Compares replay against recording before any correction; writes `UserData/GrannyTAS/Reports/*.txt` |
-| `src/InteractionPin.cs` | Records `PickRay`/`DoorRay` pose + fall flags at cast time; pins them for that call on replay |
+| `src/InteractionPin.cs` | Records `PickRay`/`DoorRay` pose + fall flags at cast time; pins them for that call on replay. On a recorded pickup's frame: steers the item under the ray, opens the gates and hands over the click the game would drop (ring gate); if the game still misses it, forces the pickup in that call's postfix |
 | `src/PickupDiagnostics.cs` | Traces the item-pickup gate chain and ray (off by default) |
 | `src/EnemyEsp.cs` | Read-only enemy ESP: boxes/labels/off-screen arrows, radar with vision cones, nav paths, path ETA, door countdown ring |
 | `src/DoorTimer.cs` | Granny/Grandpa door-opening rules from the disassembly; exact tick countdown (see ida-findings) |
@@ -119,7 +119,7 @@ hotkeys, config persistence, replay drift correction) is implemented and was
 verified on a recorded run (1912 frames, 0.001mm drift). 0.4.0 adds fixed-step
 phase alignment, an exact clock at every speed, player-rig restore, interaction
 ray pinning, scene-qualified rigidbody identities, and the per-frame sync check
-(217 regression checks, including a simulated 0.48x-record / 1x-replay with an
+(241 regression checks, including a simulated 0.48x-record / 1x-replay with an
 identical FixedUpdate pattern). **Not yet verified in the game** — see the
 checklist in [docs/replay-sync.md](docs/replay-sync.md). Remaining: ImGui
 keyboard/text input (not currently needed). See the archive's Status checklist

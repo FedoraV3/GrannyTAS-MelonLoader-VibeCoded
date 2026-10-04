@@ -67,11 +67,11 @@ namespace GrannyTAS
         public string TeleportNote = "";
         public int PositionCorrections;
         public int RigidbodyCorrections;
-        public int PickupRecoveries;
-        public int PickupRecoveryNoOps;
-        public int PickupRecoveryFailures;
-        public int PickupRecoverySkipped;
         public int RayPins;
+        public int ItemSteers;
+        public int ClickPins;
+        public int ForcedPickups;
+        public int ForceFailures;
         public int FlagPins;
         public int MissingRigidbodies;
         public string FirstMissingRigidbody = "";
@@ -292,18 +292,31 @@ namespace GrannyTAS
                 "(the world under the ray differs, not the ray)");
         }
 
-        /// <summary>Compare what happened between one frame's issue and the next's.</summary>
-        public void CompareEvents(int frame, FrameTrace expected, FrameTrace actual, int[] raysConsumed, bool compareRays = true)
+        /// <summary>
+        /// Compare what happened between one frame's issue and the next's.
+        /// <paramref name="forced"/> are pickups in <paramref name="actual"/>
+        /// the mod made after the game's own pickup missed them: they are
+        /// compared as the misses they were.
+        /// </summary>
+        public void CompareEvents(int frame, FrameTrace expected, FrameTrace actual, int[] raysConsumed, bool compareRays = true,
+            IReadOnlyList<string> forced = null)
         {
             if (expected == null || actual == null) return;
 
-            if (SequenceEqual(expected.Pickups, actual.Pickups))
+            var natural = actual.Pickups;
+            if (forced != null && forced.Count > 0)
+            {
+                natural = new List<string>(actual.Pickups);
+                foreach (var item in forced) natural.Remove(item);
+            }
+            if (SequenceEqual(expected.Pickups, natural))
             {
                 if (expected.Pickups.Count > 0) Match(Area.Pickups);
             }
             else
-                Differ(Area.Pickups, frame, Math.Abs(expected.Pickups.Count - actual.Pickups.Count),
-                    $"recorded [{string.Join(", ", expected.Pickups)}], replay [{string.Join(", ", actual.Pickups)}]");
+                Differ(Area.Pickups, frame, Math.Abs(expected.Pickups.Count - natural.Count),
+                    $"recorded [{string.Join(", ", expected.Pickups)}], replay [{string.Join(", ", natural)}]" +
+                    (forced != null && forced.Count > 0 ? $", forced [{string.Join(", ", forced)}]" : ""));
 
             if (!compareRays) return;
             for (var kind = 0; kind < 2; kind++)
@@ -317,32 +330,43 @@ namespace GrannyTAS
             }
         }
 
-        public void RecordPickupRecovery(int frame, string item, PickupRecoveryResult result)
+        /// <summary>A recorded item was put under the pinned pickup ray for one call.</summary>
+        public void RecordItemSteer(int frame, string item, float distance)
         {
-            var shown = string.IsNullOrEmpty(item) ? "(empty name)" : item;
-            var note = string.IsNullOrEmpty(result.Note) ? "" : ": " + result.Note;
-            switch (result.Outcome)
-            {
-                case PickupRecoveryOutcome.Applied:
-                    PickupRecoveries++;
-                    Detail($"f{frame} pickup recovery: forced '{shown}'{note}");
-                    break;
-                case PickupRecoveryOutcome.AlreadyHeld:
-                    PickupRecoveryNoOps++;
-                    Detail($"f{frame} pickup recovery: '{shown}' already held{note}");
-                    break;
-                default:
-                    PickupRecoveryFailures++;
-                    Detail($"f{frame} pickup recovery FAILED for '{shown}'{note}");
-                    break;
-            }
+            ItemSteers++;
+            Detail(distance > 0f
+                ? string.Format(CultureInfo.InvariantCulture,
+                    "f{0} pickup ray: '{1}' moved {2:0.0} cm under the recorded ray for one call", frame, item, distance * 100f)
+                : $"f{frame} pickup ray: '{item}' reached by syncing its collider to its transform");
         }
 
-        public void RecordPickupRecoverySkipped(int frame, int count, string reason)
+        /// <summary>A recorded item the pickup ray missed was left where the replay has it.</summary>
+        public void RecordItemLeft(int frame, string item, string reason) =>
+            Detail($"f{frame} pickup ray: '{item}' not steered: {reason}");
+
+        /// <summary>
+        /// The game would have dropped the recorded click (no ring from the
+        /// previous cast, or no interact edge), so the click was handed over.
+        /// </summary>
+        public void RecordClickPin(int frame, string item)
         {
-            if (count <= 0) return;
-            PickupRecoverySkipped += count;
-            Detail($"f{frame} pickup recovery: skipped {count} item(s): {reason}");
+            ClickPins++;
+            Detail($"f{frame} pickup ray: recorded click on '{item}' handed to PickRay (the game would have dropped it)");
+        }
+
+        /// <summary>The game's own pickup missed a recorded item, so the mod picked it up after the call.</summary>
+        public void RecordPickupForced(int frame, string item, string note)
+        {
+            ForcedPickups++;
+            Detail($"f{frame} pickup forced: '{item}' put in hand after the game's pickup missed it" +
+                   (string.IsNullOrEmpty(note) ? "" : $" ({note})"));
+        }
+
+        /// <summary>A recorded pickup that even forcing could not make.</summary>
+        public void RecordPickupForceFailed(int frame, string item, string reason)
+        {
+            ForceFailures++;
+            Detail($"f{frame} pickup NOT forced: '{item}': {reason}");
         }
 
         private void Detail(string text)
@@ -389,7 +413,8 @@ namespace GrannyTAS
             if (FramesReplayed == 0) return "sync: no frames replayed";
             if (Exact)
                 return $"sync: BIT-IDENTICAL over {FramesReplayed} frames" +
-                       (RayPins + FlagPins + PositionCorrections + RigidbodyCorrections > 0 ? " (after corrections)" : "");
+                       (RayPins + FlagPins + ItemSteers + ClickPins + PositionCorrections + RigidbodyCorrections > 0
+                           ? " (after corrections)" : "");
             if (!FirstDivergence(out var frame, out var area))
                 return $"sync: diverged — {MissingRigidbodies} recorded rigidbodies missing on replay";
             var areas = 0;
@@ -440,8 +465,10 @@ namespace GrannyTAS
             lines.Add($"  rigidbodies       {RigidbodyCorrections} body-frame(s)");
             lines.Add($"  interaction rays  {RayPins} cast(s) pinned to the recorded pose");
             lines.Add($"  fall flags        {FlagPins} PickRay call(s) given the recorded flags");
-            lines.Add($"  missed pickups    {PickupRecoveries} forced, {PickupRecoveryNoOps} already held, " +
-                      $"{PickupRecoveryFailures} failed, {PickupRecoverySkipped} skipped");
+            lines.Add($"  pickup items      {ItemSteers} cast(s) given the recorded item under the ray");
+            lines.Add($"  pickup clicks     {ClickPins} cast(s) given the recorded click the game would have dropped");
+            lines.Add($"  forced pickups    {ForcedPickups} item(s) picked up after the game's pickup missed them" +
+                      (ForceFailures > 0 ? $", {ForceFailures} could not be" : ""));
             if (MissingRigidbodies > 0)
                 lines.Add($"  missing bodies    {MissingRigidbodies} (first: {FirstMissingRigidbody})");
             if (UnmatchedRays > 0)
