@@ -78,7 +78,7 @@ become visible to the pickup ray.
 | `src/VirtualInput.cs` | Harmony patches over `Input.*`; latched buffer; macro injection point |
 | `src/InputFrame.cs` | One frame of input — the unit recorded and replayed |
 | `src/MacroFile.cs` | Text macro format, load/save |
-| `src/MacroEngine.cs` | Record/playback state machine |
+| `src/MacroEngine.cs` | Record/playback state machine; snapshots = frame bookmarks loaded by level restart + turbo re-sim, recording resumes paused (one-shot auto-load on death) |
 | `src/WorldSnapshot.cs` | Captures/restores entity positions so a replay starts from the recorded world |
 | `src/PlayerRigSnapshot.cs` | Captures/restores the player's animation phase, local transforms, controller geometry and flags |
 | `src/FrameTrace.cs` | Per-frame world state (clock, RNG, camera, controller, enemies) plus rays/pickups, stored in v5 macros |
@@ -87,6 +87,8 @@ become visible to the pickup ray.
 | `src/SyncReport.cs` | Compares replay against recording before any correction; writes `UserData/GrannyTAS/Reports/*.txt` |
 | `src/InteractionPin.cs` | Records `PickRay`/`DoorRay` pose + fall flags at cast time; pins them for that call on replay |
 | `src/PickupDiagnostics.cs` | Traces the item-pickup gate chain and ray (off by default) |
+| `src/EnemyEsp.cs` | Read-only enemy ESP: boxes/labels/off-screen arrows, radar with vision cones, nav paths, path ETA, door countdown ring |
+| `src/DoorTimer.cs` | Granny/Grandpa door-opening rules from the disassembly; exact tick countdown (see ida-findings) |
 | `src/ImGuiHost.cs` | Dear ImGui context + Unity GL renderer backend |
 | `src/TasWindow.cs` | The ImGui control panel |
 
@@ -95,9 +97,9 @@ gates input on (`Paused.IsPaused`, `MobileFPS.isAllowedToMove`, `.AbleToMove`),
 plus a 12-frame settle and a day-1 bed-animation check. Rationale and full flag
 table in the archive.
 
-Default hotkeys: **Insert** panel · F2 pause · F3 step · F4 step x10 ·
+Default hotkeys: **Insert** panel · F1 enemy ESP · F2 pause · F3 step · F4 step x10 ·
 F5/F6 tick rate · F7/F8 speed · F9 uncapped · F10 clear buffer · F11 record ·
-F12 play. All rebindable in the panel's Keybinds section.
+F12 play · Home save snapshot · End load snapshot. All rebindable in the panel's Keybinds section.
 
 Macros: plain text, one line per simulated frame, `.grannytas` extension,
 header carries `tickRate`/`physicsRate`/`rngSeed`/`seedManagerSeed`/`scene`

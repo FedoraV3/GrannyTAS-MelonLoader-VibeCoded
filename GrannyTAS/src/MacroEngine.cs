@@ -91,6 +91,15 @@ namespace GrannyTAS
         private SyncReport _report;
         private readonly InputFrame _poseScratch = new InputFrame();
 
+        // ---- snapshots (rewind by re-simulation) ----
+        // A snapshot is a bookmark into the recording, not a copy of the world:
+        // loading one restarts the level and replays frames 0..N-1 at turbo,
+        // which reproduces the world at frame N exactly as a replay of the
+        // finished macro will — anything less would record a continuation
+        // the final replay could never reach. See LoadSnapshot.
+        private bool _rewinding;
+        private bool _handoffPending;
+
         public MacroMode Mode { get; private set; } = MacroMode.Idle;
         public int Playhead => _playhead;
         public int FrameCount => _macro.Count;
@@ -135,6 +144,26 @@ namespace GrannyTAS
         /// first scan or a caller asks again.
         /// </summary>
         public IReadOnlyList<SavedMacroInfo> SavedMacros { get; private set; } = Array.Empty<SavedMacroInfo>();
+
+        /// <summary>Frame the snapshot returns to (frames kept: 0..N-1), or -1 for none.</summary>
+        public int SnapshotFrame { get; private set; } = -1;
+
+        public bool HasSnapshot => SnapshotFrame >= 0;
+
+        /// <summary>
+        /// Whether dying loads the snapshot by itself. One-shot: an automatic
+        /// load disarms it, and only taking a new snapshot arms it again, so a
+        /// spot that keeps killing you cannot loop forever.
+        /// </summary>
+        public bool SnapshotArmed { get; private set; }
+
+        /// <summary>True from a snapshot load until recording resumes at the snapshot frame.</summary>
+        public bool IsRewinding => _rewinding;
+
+        /// <summary>Whether a snapshot load is possible right now.</summary>
+        public bool CanLoadSnapshot =>
+            HasSnapshot && SnapshotFrame <= _macro.Count &&
+            (Mode == MacroMode.Recording || (Mode == MacroMode.Idle && HasUnsavedRecording));
 
         public MacroEngine(MelonLogger.Instance log, TimeController time, IMacroGameSetup setup = null,
             IPickupRecovery pickupRecovery = null)
@@ -199,6 +228,7 @@ namespace GrannyTAS
 
             RecordedAtSpeed = _time.Speed;
             _playhead = 0;
+            ClearSnapshot();
 
             // A fresh recording is not yet any file on disk — clear the name
             // rather than leave it pointing at whatever was loaded before.
@@ -252,6 +282,7 @@ namespace GrannyTAS
                 File.Move(temporaryPath, path);
                 HasUnsavedRecording = false;
                 LoadedPath = path;
+                ClearSnapshot();
                 PendingStatus = $"Saved as {Path.GetFileName(path)}";
                 RefreshSavedList();
                 status = PendingStatus;
@@ -284,6 +315,7 @@ namespace GrannyTAS
             _playhead = 0;
             LoadedPath = null;
             HasUnsavedRecording = false;
+            ClearSnapshot();
             PendingStatus = "Recording discarded.";
             _log.Msg(PendingStatus);
         }
@@ -433,8 +465,21 @@ namespace GrannyTAS
                 _playbackPacingSaved = true;
             }
             _time.SetSpeed(1f);
+            // A rewind is not for watching: fast-forward as fast as the machine
+            // renders. Pacing never changes the simulation (the frame delta is
+            // pinned), so this replays the same frames a 1x replay would.
+            if (_rewinding) _time.SetUncapped(true);
             _time.SetPaused(false);
             _time.SimulationRatesLocked = true;
+
+            // Rewinding to frame 0 has nothing to replay, so no pre-roll either:
+            // recording resumes on a fresh clock exactly like StartRecording.
+            if (_macro.Count == 0)
+            {
+                _startPhaseError = double.NaN;
+                StartPlaybackNow();
+                return;
+            }
 
             var first = _macro.Frames[0].Trace;
             if (first != null && first.HasClock && _time.FixedStep > 0)
@@ -614,8 +659,10 @@ namespace GrannyTAS
             _time.SimulationRatesLocked = true;
             PendingStatus = "";
 
-            _log.Msg($"Playing {_macro.Count} frames at 1x ({_macro.DurationSeconds:0.##}s)" +
+            _log.Msg((_rewinding ? $"Rewinding — fast-forwarding {_macro.Count} frames" : $"Playing {_macro.Count} frames at 1x ({_macro.DurationSeconds:0.##}s)") +
                      (double.IsNaN(_startPhaseError) ? "." : $", fixed-step phase aligned to within {_startPhaseError * 1e9:0.###} ns."));
+
+            if (_rewinding && _macro.Count == 0) _handoffPending = true;
         }
 
         /// <summary>Undo <see cref="BeginPlayback"/> when the replay cannot start after all.</summary>
@@ -633,6 +680,7 @@ namespace GrannyTAS
             RestorePacing();
             PendingStatus = reason;
             _log.Warning(reason);
+            RewindFailed(reason);
         }
 
         private void RestorePacing()
@@ -685,12 +733,13 @@ namespace GrannyTAS
                          $"{PhysicsFrameState.CorrectionCount} correction(s).");
 
             FinishReport();
+            RewindFailed(finalStatus);
         }
 
-        private void FinishReport()
+        private void FinishReport(bool keepProbe = false)
         {
             SyncTracker.Stop();
-            SyncProbe.End();
+            if (!keepProbe) SyncProbe.End();
             var report = _report;
             _report = null;
             if (report == null) return;
@@ -738,6 +787,7 @@ namespace GrannyTAS
             if (_time.Enabled) _time.SetPaused(false);
             RestorePacing();
             _log.Warning(reason);
+            RewindFailed(reason);
         }
 
         /// <summary>
@@ -784,7 +834,141 @@ namespace GrannyTAS
 
             VirtualInput.AdvanceFrom(frame);
             _playhead++;
+
+            // The last bookmarked frame is out. The switch back to recording
+            // waits for the start of the next engine frame (TakeRewindHandoff),
+            // so this frame's Update — and every pickup and ray in it — still
+            // belongs to the replay that the recording already holds.
+            if (_rewinding && _playhead >= _macro.Count) _handoffPending = true;
             return true;
+        }
+
+        // ---- snapshots --------------------------------------------------------
+
+        /// <summary>Bookmark the current frame of the recording and arm auto-load on death.</summary>
+        public void SaveSnapshot()
+        {
+            if (Mode != MacroMode.Recording)
+            {
+                _log.Warning("Snapshots are taken while recording.");
+                return;
+            }
+            SnapshotFrame = _macro.Count;
+            SnapshotArmed = true;
+            PendingStatus = $"Snapshot at frame {SnapshotFrame} — dying loads it once.";
+            _log.Msg(PendingStatus);
+        }
+
+        /// <summary>
+        /// Return to the snapshot: drop every frame recorded after it, restart
+        /// the level, fast-forward the kept frames, and hand control back —
+        /// paused, still recording — at the snapshot frame.
+        ///
+        /// Works while recording, and also right after a recording stopped
+        /// (the usual case after a death with auto-load disarmed). If the
+        /// rewind cannot finish, the shortened recording is kept unsaved.
+        /// </summary>
+        public void LoadSnapshot(string why = null)
+        {
+            if (!HasSnapshot)
+            {
+                _log.Warning("No snapshot to load — take one while recording first.");
+                return;
+            }
+            if (!CanLoadSnapshot)
+            {
+                _log.Warning(SnapshotFrame > _macro.Count
+                    ? "The snapshot is past the end of this recording."
+                    : "Load a snapshot while recording, or right after the recording stopped.");
+                return;
+            }
+
+            if (Mode == MacroMode.Recording)
+            {
+                Mode = MacroMode.Idle;
+                SyncTracker.Stop();
+                SyncProbe.End();
+            }
+            HasUnsavedRecording = false;
+
+            var dropped = _macro.Count - SnapshotFrame;
+            _macro.Frames.RemoveRange(SnapshotFrame, dropped);
+            _rewinding = true;
+            _handoffPending = false;
+
+            _log.Msg($"Loading snapshot{(why != null ? " (" + why + ")" : "")}: dropped {dropped} frame(s), " +
+                     $"replaying {SnapshotFrame} from a level restart.");
+            BeginPreparing($"rewinding to frame {SnapshotFrame}");
+        }
+
+        /// <summary>
+        /// Death while recording. Loads the snapshot if it is armed, and disarms
+        /// it. Returns true when a rewind has started, so the caller must not
+        /// stop the recording.
+        /// </summary>
+        public bool TryAutoLoadSnapshot()
+        {
+            if (Mode != MacroMode.Recording || !SnapshotArmed || !CanLoadSnapshot) return false;
+            SnapshotArmed = false;
+            LoadSnapshot("caught — auto-load");
+            return _rewinding;
+        }
+
+        /// <summary>
+        /// Call at the start of an engine frame, before the clock decides
+        /// whether it simulates. When the rewind has replayed its last frame,
+        /// switches back to recording and returns true: the caller pauses, so
+        /// the snapshot frame is the next one recorded and nothing runs on
+        /// until the player steps or resumes.
+        /// </summary>
+        public bool TakeRewindHandoff()
+        {
+            if (!_handoffPending || Mode != MacroMode.Playing) return false;
+            _handoffPending = false;
+            _rewinding = false;
+
+            // Close and score the replayed stretch; keep the probe running so
+            // the next recorded frame's clock trace continues from this one.
+            SyncTracker.CompleteReplay();
+            Mode = MacroMode.Idle;
+            FinishReport(keepProbe: true);
+
+            _time.SimulationRatesLocked = false;
+            RestorePacing();
+            RecordedAtSpeed = _time.Speed;
+            SyncTracker.BeginRecording();
+            Mode = MacroMode.Recording;
+            _time.SimulationRatesLocked = true;
+            _playhead = _macro.Count;
+            // Playback resets the counter on the engine frame that issues frame
+            // 0, so it trails the playhead by one; a recording needs it equal to
+            // the index the next captured frame is written at.
+            _time.ResetFrameCount(_macro.Count);
+
+            var verdict = LastReport == null || !LastReport.TracesPresent || LastReport.Exact
+                ? "frames reproduced exactly"
+                : "WARNING: the fast-forward diverged from the recording — see the sync report";
+            PendingStatus = $"Back at frame {_macro.Count}, paused and recording ({verdict}).";
+            if (verdict.StartsWith("WARNING")) _log.Warning(PendingStatus);
+            else _log.Msg(PendingStatus);
+            return true;
+        }
+
+        private void RewindFailed(string reason)
+        {
+            if (!_rewinding) return;
+            _rewinding = false;
+            _handoffPending = false;
+            HasUnsavedRecording = true;
+            PendingStatus = $"Rewind did not finish ({reason}). The recording is kept up to frame {_macro.Count} — " +
+                            "load the snapshot again, or save/discard it.";
+            _log.Warning(PendingStatus);
+        }
+
+        private void ClearSnapshot()
+        {
+            SnapshotFrame = -1;
+            SnapshotArmed = false;
         }
 
         private void CompareBoundary(InputFrame frame)
@@ -878,6 +1062,7 @@ namespace GrannyTAS
                 _macro = MacroFile.Load(path);
                 _playhead = 0;
                 LoadedPath = path;
+                ClearSnapshot();
                 _log.Msg($"Loaded {_macro.Count} frames from {path}");
             }
             catch (Exception e)

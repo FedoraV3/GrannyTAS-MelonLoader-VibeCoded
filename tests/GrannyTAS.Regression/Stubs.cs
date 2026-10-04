@@ -8,7 +8,7 @@ namespace UnityEngine
         Space, LeftShift, RightShift, LeftControl, RightControl, LeftAlt,
         E, Q, F, R, G, C, X, Z, V, B, T, H, Tab, Escape, Return,
         Alpha1, Alpha2, Alpha3, Alpha4, Alpha5, Alpha6, Alpha7, Alpha8, Alpha9, Alpha0,
-        Insert, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, Backspace,
+        Insert, Home, End, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, Backspace,
         Mouse0 = 323, Mouse1, Mouse2, JoystickButton0 = 330
     }
     public static class Input

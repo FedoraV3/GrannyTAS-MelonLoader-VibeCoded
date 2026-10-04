@@ -1331,4 +1331,131 @@ clockTime.Disable();
 if (Directory.Exists(MelonLoader.Utils.MelonEnvironment.UserDataDirectory))
     Directory.Delete(MelonLoader.Utils.MelonEnvironment.UserDataDirectory, true);
 
+// ---- door countdown (AI_Granny/AI_Grandpa FixedUpdate door branch) ----
+var plainDoor = DoorTimer.ForName("Innerdoor", false);
+var lockedDoor = DoorTimer.ForName("Backdoor", false);
+var prisonDoor = DoorTimer.ForName("prisonDoor", false);
+Check(plainDoor != null && plainDoor.Threshold == 2f && !plainDoor.Strict, "plain doors open once the timer reaches 2 s");
+Check(DoorTimer.ForName("GarderobDoor", false) == null && DoorTimer.ForName("GarderobDoor", true)?.Threshold == 1f,
+    "closets count only when the enemy can open them");
+Check(DoorTimer.ForName("Innerdoor_open", false) == null && DoorTimer.ForName("", true) == null,
+    "an opened (renamed) door or any other collider is not a door");
+Check(DoorTimer.TicksRemaining(plainDoor, 0f, .5f) == 4, "a >= threshold acts on the step that reaches it");
+Check(DoorTimer.TicksRemaining(prisonDoor, 0f, .5f) == 5, "a > threshold needs the step after reaching it");
+Check(DoorTimer.TicksRemaining(lockedDoor, 0f, .5f) == 9 && lockedDoor.Rattles.Length == 3,
+    "backdoor opens on the first step past 4.3 s after three rattles");
+Check(DoorTimer.TicksRemaining(plainDoor, 2f, .02f) == 0 && DoorTimer.TicksRemaining(plainDoor, 0f, 0f) == -1,
+    "a finished timer needs no steps and a zero step is unknown");
+var doorStepsAgree = true;
+for (var t = 0f; t < 2f; t = .02f + t)
+    doorStepsAgree &= DoorTimer.TicksRemaining(plainDoor, t, .02f) == 1 + DoorTimer.TicksRemaining(plainDoor, .02f + t, .02f);
+Check(doorStepsAgree, "door countdown drops by exactly one per fixed step under single-precision accumulation");
+
+// ---- snapshot: rewind by restart + fast-forward ----
+bool RewindFrame(MacroEngine e, TimeController t)
+{
+    // GrannyTasMod.OnUpdate takes the handoff before the clock decides.
+    if (e.TakeRewindHandoff()) t.SetPaused(true);
+    return ModFrame(e, t);
+}
+
+var rewindTime = new TimeController();
+Time.timeScale = 1;
+Time.captureDeltaTime = 0;
+Time.fixedDeltaTime = .02f;
+rewindTime.Enable();
+rewindTime.SetTickRate(60);
+rewindTime.SetSpeed(.5f);
+var rewindSetup = new FakeRewindSetup();
+var rw = new MacroEngine(new MelonLogger.Instance(), rewindTime, rewindSetup);
+for (var i = 0; i < 3; i++) ModFrame(rw, rewindTime);
+rw.StartRecording();
+rw.Macro.Snapshot.Entities.Clear();
+for (var i = 0; i < 20; i++) ModFrame(rw, rewindTime);
+rw.SaveSnapshot();
+Check(rw.HasSnapshot && rw.SnapshotFrame == 20 && rw.SnapshotArmed, "a snapshot bookmarks the next frame to record and arms auto-load");
+var keptFrames = rw.Macro.Frames.Take(20).ToList();
+for (var i = 0; i < 30; i++) ModFrame(rw, rewindTime);
+Check(rw.FrameCount == 50, "recording continues past the snapshot");
+
+Check(rw.TryAutoLoadSnapshot() && rw.Mode == MacroMode.Preparing && rewindSetup.Restarts == 1 &&
+      rw.FrameCount == 20 && !rw.SnapshotArmed && rw.IsRewinding,
+    "death with an armed snapshot drops later frames, disarms, and restarts the level");
+Check(rw.Macro.Frames.SequenceEqual(keptFrames), "the frames before the snapshot are kept untouched");
+
+rw.NotifySceneLoaded(rw.Macro.Scene);
+rw.UpdatePreparing(true);
+var sawTurbo = false;
+for (var i = 0; i < 200 && rw.Mode != MacroMode.Recording; i++)
+{
+    sawTurbo |= rw.Mode == MacroMode.Playing && rewindTime.Uncapped;
+    RewindFrame(rw, rewindTime);
+}
+Check(sawTurbo, "the fast-forward runs uncapped");
+Check(rw.Mode == MacroMode.Recording && !rw.IsRewinding && rw.FrameCount == 20 && rewindTime.FrameCount == 20 &&
+      rewindTime.Paused && !rewindTime.Uncapped && Same(rewindTime.Speed, .5f) && rewindTime.SimulationRatesLocked,
+    $"after the fast-forward recording resumes paused at the snapshot frame with the recording pace (mode={rw.Mode}, frames={rw.FrameCount}, clock={rewindTime.FrameCount})");
+Check(rw.LastReport != null && rw.LastReport.FramesReplayed == 20 && rw.LastReport.Exact,
+    "the fast-forward reproduced every kept frame bit-identically");
+
+for (var i = 0; i < 5; i++) RewindFrame(rw, rewindTime);
+Check(rw.FrameCount == 20, "nothing records while paused after the rewind");
+rewindTime.StepFrames(5);
+for (var i = 0; i < 10; i++) RewindFrame(rw, rewindTime);
+Check(rw.FrameCount == 25 && rw.Macro.Frames[20].Trace.HasClock && rw.Macro.Frames[20].Trace.FixedSteps >= 0,
+    "stepping records from the snapshot frame on, with an unbroken clock trace");
+
+Check(!rw.TryAutoLoadSnapshot() && rw.Mode == MacroMode.Recording,
+    "a second death does not auto-load a used snapshot");
+
+// The point of rewinding by re-simulation: the spliced take replays from the
+// start as one run.
+rw.StopRecording();
+Time.timeAsDouble += 3.3333;
+while (Time.fixedTimeAsDouble + Time.fixedDeltaTime <= Time.timeAsDouble) Time.fixedTimeAsDouble += Time.fixedDeltaTime;
+rw.StartPlayback();
+for (var i = 0; i < 200 && rw.Mode != MacroMode.Idle; i++) RewindFrame(rw, rewindTime);
+Check(rw.LastReport != null && rw.LastReport.FramesReplayed == 25 && rw.LastReport.Exact && !rw.IsRewinding,
+    "a take continued after a rewind replays from frame 0 bit-identically");
+rw.LoadSnapshot();
+Check(rw.Mode == MacroMode.Preparing && rw.FrameCount == 20 && rewindSetup.Restarts == 2,
+    "the snapshot can still be loaded by hand");
+rw.StopPlayback();
+Check(rw.Mode == MacroMode.Idle && rw.HasUnsavedRecording && rw.FrameCount == 20 && !rw.IsRewinding,
+    "a cancelled rewind keeps the shortened recording unsaved");
+Check(rw.CanLoadSnapshot, "after a recording stops the snapshot can still be loaded");
+rw.LoadSnapshot();
+Check(rw.Mode == MacroMode.Preparing && !rw.HasUnsavedRecording, "loading from a stopped recording rewinds it");
+rw.StopPlayback();
+rw.SaveSnapshot();
+Check(!rw.SnapshotArmed, "snapshots cannot be taken outside a recording");
+rw.DiscardRecording();
+Check(!rw.HasSnapshot, "discarding the recording forgets its snapshot");
+rewindTime.Disable();
+
+// ---- wake-up speed-up key during a reload ----
+var wasActive = VirtualInput.Active;
+VirtualInput.Active = true;
+VirtualInput.PassWakeUpKey = false;
+Check(VirtualInput.InterceptKey(KeyCode.B) && VirtualInput.InterceptKey(KeyCode.W),
+    "a frozen reload intercepts every key by default");
+VirtualInput.PassWakeUpKey = true;
+Check(!VirtualInput.InterceptKey(KeyCode.B) && VirtualInput.InterceptKey(KeyCode.W) && VirtualInput.InterceptKey(KeyCode.E),
+    "during the reload wake-up only the game's B speed-up key reaches the game");
+VirtualInput.PassWakeUpKey = false;
+VirtualInput.Active = wasActive;
+
 Console.WriteLine($"{passed} regression checks passed");
+
+sealed class FakeRewindSetup : IMacroGameSetup
+{
+    public int Restarts;
+    public void Capture(MacroFile macro) => macro.HasSetupMetadata = false;
+    public bool RequiresRestart(MacroFile macro, out string reason) { reason = ""; return false; }
+    public bool CanReplayBuild(MacroFile macro, out string reason) { reason = ""; return true; }
+    public void ApplyAndRestart(MacroFile macro) => Restarts++;
+    public bool LoadedSetupMatches(MacroFile macro, out string reason) { reason = ""; return true; }
+    public void CancelPending() { }
+    public float Realtime => 0f;
+    public bool VerifiesLevelSetup => true;
+}

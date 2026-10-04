@@ -46,6 +46,8 @@ namespace GrannyTAS
                 ImGui.Separator();
                 DrawMacro(macro);
                 ImGui.Separator();
+                DrawEsp(mod.Config);
+                ImGui.Separator();
                 DrawSavedMacros(macro);
                 ImGui.Separator();
                 DrawBuffer();
@@ -175,6 +177,11 @@ namespace GrannyTAS
                 case MacroMode.Recording:
                     ImGui.TextColored(Hot, $"RECORDING — {macro.FrameCount} frames");
                     break;
+                case MacroMode.Playing when macro.IsRewinding:
+                    ImGui.TextColored(Warn, $"REWINDING — {macro.Playhead}/{macro.FrameCount}");
+                    ImGui.ProgressBar(macro.FrameCount > 0 ? (float)macro.Playhead / macro.FrameCount : 0f,
+                        new Vector2(-1f, 0f));
+                    break;
                 case MacroMode.Playing:
                     ImGui.TextColored(Good, $"PLAYING — {macro.Playhead}/{macro.FrameCount}");
                     ImGui.ProgressBar(macro.FrameCount > 0 ? (float)macro.Playhead / macro.FrameCount : 0f,
@@ -249,10 +256,42 @@ namespace GrannyTAS
 
             ImGui.EndDisabled();
 
+            DrawSnapshot(macro);
+
             ImGui.TextColored(Dim, "records at any speed; always plays back at 1x");
             ImGui.TextWrapped("Replay restores positions and level setup; doors, AI timers, and other world state may differ.");
 
             DrawSync(macro);
+        }
+
+        /// <summary>
+        /// The rewind point. Loading restarts the level and fast-forwards the
+        /// kept frames, so what you continue from is exactly what the finished
+        /// macro will replay through.
+        /// </summary>
+        private static void DrawSnapshot(MacroEngine macro)
+        {
+            ImGui.Spacing();
+            if (!macro.HasSnapshot)
+                ImGui.TextColored(Dim, "snapshot  none — take one while recording");
+            else
+            {
+                ImGui.Text($"snapshot  frame {macro.SnapshotFrame}");
+                ImGui.SameLine();
+                if (macro.SnapshotArmed) ImGui.TextColored(Good, "  auto-load on death ARMED");
+                else ImGui.TextColored(Dim, "  auto-load used — save again to re-arm");
+            }
+
+            ImGui.BeginDisabled(macro.Mode != MacroMode.Recording);
+            if (ImGui.Button("Save snapshot" + Keybinds.Suffix(TasAction.SaveSnapshot), new Vector2(160f, 0f)))
+                macro.SaveSnapshot();
+            ImGui.EndDisabled();
+            ImGui.SameLine();
+            ImGui.BeginDisabled(!macro.CanLoadSnapshot);
+            if (ImGui.Button("Load snapshot" + Keybinds.Suffix(TasAction.LoadSnapshot), new Vector2(160f, 0f)))
+                macro.LoadSnapshot();
+            ImGui.EndDisabled();
+            ImGui.TextColored(Dim, "load = level restart + fast-forward; exact on replay");
         }
 
         /// <summary>
@@ -291,6 +330,49 @@ namespace GrannyTAS
 
             if (live == null && !string.IsNullOrEmpty(macro.LastReportPath))
                 ImGui.TextColored(Dim, "  report: " + Path.GetFileName(macro.LastReportPath));
+        }
+
+        /// <summary>
+        /// Where each enemy is and what it is doing, as numbers — the overlay
+        /// shows the same thing in the world. Read while paused to time a move
+        /// against Granny instead of guessing.
+        /// </summary>
+        private static void DrawEsp(TasConfig cfg)
+        {
+            if (!ImGui.CollapsingHeader("Enemies (ESP)", ImGuiTreeNodeFlags.DefaultOpen)) return;
+
+            var show = cfg.ShowEsp;
+            if (ImGui.Checkbox("show ESP" + Keybinds.Suffix(TasAction.ToggleEsp), ref show)) cfg.ShowEsp = show;
+            ImGui.SameLine();
+            var radar = cfg.EspRadar;
+            if (ImGui.Checkbox("radar", ref radar)) cfg.EspRadar = radar;
+
+            var paths = cfg.EspPaths;
+            if (ImGui.Checkbox("paths", ref paths)) cfg.EspPaths = paths;
+            ImGui.SameLine();
+            var vision = cfg.EspVision;
+            if (ImGui.Checkbox("vision cones", ref vision)) cfg.EspVision = vision;
+
+            var range = cfg.EspRadarRange;
+            if (ImGui.SliderFloat("radar range", ref range, 10f, 80f, "%.0f m")) cfg.EspRadarRange = range;
+            ImGui.TextColored(Dim, "display only; never changes a recording or replay");
+
+            var seen = EnemyEsp.Current;
+            if (seen.Count == 0)
+            {
+                ImGui.TextColored(Dim, "  no enemies in this scene");
+                return;
+            }
+
+            foreach (var s in seen)
+            {
+                var col = EnemyEsp.AlertColor(s.Alert);
+                ImGui.TextColored(col, $"  {s.Name,-8} {EnemyEsp.DistanceText(s),-12}");
+                var line = EnemyEsp.StateLine(s);
+                if (line.Length == 0) continue;
+                ImGui.SameLine();
+                ImGui.TextColored(s.SeesPlayer ? Hot : col, line);
+            }
         }
 
         /// <summary>

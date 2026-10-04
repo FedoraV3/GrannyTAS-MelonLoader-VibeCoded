@@ -41,6 +41,12 @@ namespace GrannyTAS
 
         private IntPtr _context;
         private Texture2D _fontAtlas;
+
+        // The uploaded atlas pixels, kept so the texture can be rebuilt if Unity
+        // destroys it. ImGui's own copy is freed after the first upload.
+        private byte[] _atlasPixels;
+        private int _atlasWidth;
+        private int _atlasHeight;
         private Material _material;
         private bool _frameStarted;
 
@@ -117,12 +123,6 @@ namespace GrannyTAS
             io.Fonts.GetTexDataAsRGBA32(out byte* pixels, out var width, out var height, out _);
             if (pixels == null || width <= 0 || height <= 0) return false;
 
-            _fontAtlas = new Texture2D(width, height, TextureFormat.RGBA32, false)
-            {
-                filterMode = FilterMode.Point,
-                wrapMode = TextureWrapMode.Clamp,
-            };
-
             var bytes = width * height * 4;
             var managed = new byte[bytes];
             System.Runtime.InteropServices.Marshal.Copy((IntPtr)pixels, managed, 0, bytes);
@@ -135,12 +135,35 @@ namespace GrannyTAS
             for (var row = 0; row < height; row++)
                 Buffer.BlockCopy(managed, row * stride, flipped, (height - 1 - row) * stride, stride);
 
-            _fontAtlas.LoadRawTextureData(flipped);
-            _fontAtlas.Apply(false, false);
+            _atlasPixels = flipped;
+            _atlasWidth = width;
+            _atlasHeight = height;
+            UploadFontAtlas();
 
             io.Fonts.SetTexID((IntPtr)1);
             io.Fonts.ClearTexData();
             return true;
+        }
+
+        /// <summary>
+        /// Create the atlas texture from the kept pixels.
+        ///
+        /// HideAndDontSave includes DontUnloadUnusedAsset. Without it a level
+        /// load (the game's restart, which snapshot loads and restarting
+        /// replays use) unloads the texture as unreferenced — nothing native
+        /// holds it between frames — and every glyph then samples the shader's
+        /// blank default and draws as a solid block.
+        /// </summary>
+        private void UploadFontAtlas()
+        {
+            _fontAtlas = new Texture2D(_atlasWidth, _atlasHeight, TextureFormat.RGBA32, false)
+            {
+                filterMode = FilterMode.Point,
+                wrapMode = TextureWrapMode.Clamp,
+                hideFlags = HideFlags.HideAndDontSave,
+            };
+            _fontAtlas.LoadRawTextureData(_atlasPixels);
+            _fontAtlas.Apply(false, false);
         }
 
         private bool FindMaterial()
@@ -314,6 +337,14 @@ namespace GrannyTAS
             {
                 // Pixel-space projection with Y increasing downward, matching ImGui.
                 GL.LoadPixelMatrix(0f, Screen.width, Screen.height, 0f);
+
+                // Unity's null: true once the native object is gone, whoever
+                // destroyed it. Rebuild rather than draw blocks.
+                if (_fontAtlas == null && _atlasPixels != null)
+                {
+                    UploadFontAtlas();
+                    _log.Warning("ImGui font texture was unloaded by the engine; rebuilt it.");
+                }
 
                 _material.mainTexture = _fontAtlas;
                 _material.SetPass(0);
