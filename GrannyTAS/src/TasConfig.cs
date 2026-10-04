@@ -147,7 +147,7 @@ namespace GrannyTAS
             _pinPlaybackPosition = _cat.CreateEntry("PinPlaybackPosition", true,
                 description: "On playback, put the player back on the recorded position each frame so interaction rays stay on target.");
             _pinInteractionRays = _cat.CreateEntry("PinInteractionRays", true,
-                description: "On playback, cast pickup/door rays from exactly where they were cast when recording (measured either way).");
+                description: "On playback, cast pickup/door rays from exactly where they were cast when recording, and make every recorded pickup happen on its recorded frame: the item is steered under the ray and the click handed over, and an item the game still misses is picked up right after its cast (measured either way).");
 
             _tickRate = _cat.CreateEntry("TickRate", 60f,
                 description: "Simulated frames per second. Part of the run: changing it changes the simulation.");

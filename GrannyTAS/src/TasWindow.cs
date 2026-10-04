@@ -285,9 +285,12 @@ namespace GrannyTAS
             }
             else ImGui.TextColored(Hot, $"  {report.MissingRigidbodies} recorded rigidbody frame(s) missing");
 
-            var pins = report.RayPins + report.FlagPins;
+            var pins = report.RayPins + report.FlagPins + report.ItemSteers + report.ClickPins;
             if (pins > 0 || report.PositionCorrections > 0 || report.RigidbodyCorrections > 0)
                 ImGui.TextColored(Dim, $"  steered: {report.PositionCorrections} position, {report.RigidbodyCorrections} rigidbody, {pins} ray");
+            if (report.ForcedPickups > 0 || report.ForceFailures > 0)
+                ImGui.TextColored(report.ForceFailures > 0 ? Hot : Dim,
+                    $"  forced pickups: {report.ForcedPickups}" + (report.ForceFailures > 0 ? $", {report.ForceFailures} failed" : ""));
 
             if (live == null && !string.IsNullOrEmpty(macro.LastReportPath))
                 ImGui.TextColored(Dim, "  report: " + Path.GetFileName(macro.LastReportPath));
@@ -453,7 +456,7 @@ namespace GrannyTAS
                 cfg.PinInteractionRays = rays;
                 InteractionPin.Enabled = rays;
             }
-            ImGui.TextColored(Dim, "  casts each ray from its recorded pose; the sync check counts every pin");
+            ImGui.TextColored(Dim, "  casts each ray from its recorded pose and makes every recorded pickup happen; the sync check counts every pin");
 
             var trace = cfg.PickupTrace;
             if (ImGui.Checkbox("log pickup gates", ref trace)) cfg.PickupTrace = trace;

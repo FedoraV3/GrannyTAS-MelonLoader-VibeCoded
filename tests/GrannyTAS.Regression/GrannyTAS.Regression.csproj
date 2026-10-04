@@ -23,7 +23,6 @@
     <Compile Include="../../GrannyTAS/src/FrameTrace.cs" Link="FrameTrace.cs" />
     <Compile Include="../../GrannyTAS/src/SyncReport.cs" Link="SyncReport.cs" />
     <Compile Include="../../GrannyTAS/src/SyncTracker.cs" Link="SyncTracker.cs" />
-    <Compile Include="../../GrannyTAS/src/PickupRecovery.cs" Link="PickupRecovery.cs" />
     <Compile Include="../../GrannyTAS/src/SyncProbe.cs" Link="SyncProbe.cs" />
     <Compile Include="../../GrannyTAS/src/PlayerRigSnapshot.cs" Link="PlayerRigSnapshot.cs" />
     <Compile Include="../../GrannyTAS/src/InteractionPin.cs" Link="InteractionPin.cs" />

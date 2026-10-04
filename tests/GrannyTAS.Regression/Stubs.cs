@@ -62,15 +62,35 @@ namespace UnityEngine
         /// <summary>Test hook: what a ray from an origin hits, or null for nothing.</summary>
         public static Func<Vector3, string> HitAt = _ => null;
 
+        /// <summary>Test hook: how far along the ray any hit is.</summary>
+        public static float HitDistance;
+
         public static bool Raycast(Vector3 origin, Vector3 direction, out RaycastHit hit, float maxDistance)
         {
             var name = HitAt(origin);
-            hit = name == null ? default : new RaycastHit { collider = new Collider { gameObject = new GameObject(false) { name = name } } };
+            hit = name == null ? default : new RaycastHit { collider = ColliderNamed(name), distance = HitDistance };
             return name != null;
         }
+
+        public static RaycastHit[] RaycastAll(Vector3 origin, Vector3 direction, float maxDistance) =>
+            Raycast(origin, direction, out var hit, maxDistance) ? new[] { hit } : Array.Empty<RaycastHit>();
+
+        // The collider of a live object by that name, so identity checks see
+        // the real object; otherwise a stand-in that is part of nothing.
+        private static Collider ColliderNamed(string name) =>
+            GameObject.All.LastOrDefault(go => go.activeInHierarchy && go.name == name)?.GetComponent<Collider>()
+            ?? new Collider { gameObject = new GameObject(false) { name = name } };
     }
-    public struct RaycastHit { public Collider collider; }
-    public class Collider { public GameObject gameObject; }
+    public struct RaycastHit { public Collider collider; public float distance; }
+    public struct Bounds { public Vector3 center, extents; }
+    public class Collider : Component
+    {
+        public Collider() : base(detached: true) { }
+        public bool enabled = true;
+        /// <summary>Test hook: half-size of the box, centred on the transform.</summary>
+        public Vector3 Extents;
+        public Bounds bounds => new() { center = transform?.position ?? default, extents = Extents };
+    }
     public class Object
     {
         public static bool DeferDestroy;
@@ -100,6 +120,8 @@ namespace UnityEngine
             transform = gameObject.transform;
             gameObject.Attach(this);
         }
+        // For a component given its GameObject by AddComponent or the caller.
+        protected Component(bool detached) { }
         public Transform transform;
         public GameObject gameObject;
     }
@@ -129,6 +151,11 @@ namespace UnityEngine
         public Vector3 forward => Vector3.forward;
         public int childCount => Children.Count;
         public Transform GetChild(int index) => Children[index];
+        public bool IsChildOf(Transform ancestor)
+        {
+            for (var t = this; t != null; t = t.parent) if (t == ancestor) return true;
+            return false;
+        }
         public int SetPoseCalls;
         // No hierarchy maths: a pinned world pose shows up in the local fields
         // too, which is what the pin's restore has to undo.
@@ -150,6 +177,9 @@ namespace UnityEngine
         public static Vector3 zero => new(0, 0, 0);
         public static Vector3 forward => new(0, 0, 1);
         public static Vector3 operator -(Vector3 a, Vector3 b) => new(a.x - b.x, a.y - b.y, a.z - b.z);
+        public static Vector3 operator +(Vector3 a, Vector3 b) => new(a.x + b.x, a.y + b.y, a.z + b.z);
+        public static Vector3 operator *(Vector3 a, float d) => new(a.x * d, a.y * d, a.z * d);
+        public static float Dot(Vector3 a, Vector3 b) => a.x * b.x + a.y * b.y + a.z * b.z;
         public float magnitude => MathF.Sqrt(x * x + y * y + z * z);
     }
     public struct Quaternion
@@ -319,6 +349,7 @@ namespace Il2Cpp
         public void Update() { UpdateCalls++; GetTouchInput(); }
     }
     public class PlayerStatus { public bool IsJumpscared, Killed; }
+    public class WindowJumping { public bool IsJumping; }
     public class Days { public UnityEngine.Animator PlayerBedAnim; }
     public class FallingHolder : UnityEngine.Component
     {
@@ -336,13 +367,19 @@ namespace Il2Cpp
     {
         public UnityEngine.GameObject Player;
         public Inventory Inventory;
-        public UnityEngine.GameObject H_CR = new(), H_DSH = new(), H_FT = new(), H_PTRAP = new();
+        public UnityEngine.GameObject Ring;
+        public bool buttonClicked;
+        public UnityEngine.KeyCode MainInteract = UnityEngine.KeyCode.E;
+        public WindowJumping WJ = new();
+        public PlayerStatus PlayerStatus = new();
+        public UnityEngine.GameObject H_CR = new(), H_DSH = new(), H_FT = new(), H_PTRAP = new(), H_SG = new();
         public UnityEngine.GameObject Drop1 = new(), ItemDrop = new(), ShotgunHandMain = new(),
             ShotgunHandPipes = new(), O_FT = new(), O_PTRAP = new();
         public UnityEngine.Transform DropP = new(), DropPFreezeTrap = new();
         public float RaycastDis = 2f, RaycastCheckItemDis = 3f;
-        public int CheckDropCalls;
+        public int CheckDropCalls, ShotgunCalls;
         public void CheckItemDropping() { CheckDropCalls++; Inventory?.DropLogic(); }
+        public void PickShotgun() => ShotgunCalls++;
         public void Update() { }
     }
     public class ItemDefs
@@ -459,27 +496,6 @@ namespace UnityEngine.SceneManagement
 }
 namespace GrannyTAS
 {
-    public sealed class FakePickupRecovery : IPickupRecovery
-    {
-        public readonly HashSet<string> Known = new(StringComparer.Ordinal);
-        public readonly List<string> Calls = new();
-        public int Mutations;
-        public string Held = "";
-
-        public PickupRecoveryResult TryRecover(string itemName)
-        {
-            Calls.Add(itemName);
-            if (!Known.Contains(itemName)) return PickupRecoveryResult.Failed("unknown item");
-            if (Held == itemName) return PickupRecoveryResult.AlreadyHeld();
-            Mutations++;
-            Held = itemName;
-            // Models the Harmony prefix which a real forced PickupItem call
-            // passes through. SyncTracker must suppress this event.
-            SyncTracker.OnPickup(itemName);
-            return PickupRecoveryResult.Applied();
-        }
-    }
-
     public sealed class FakeMacroGameSetup : IMacroGameSetup
     {
         public bool RestartRequired, BuildMatches = true, LoadedMatches = true;

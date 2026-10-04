@@ -31,6 +31,7 @@ time — not noise.
 | 5 | **Position correction rebuilt the CharacterController** (disable → move → enable). | Rebuilding drops the controller's grounded state; `FallingHolder` turns that into `isFalling`, which is one of `PickRay`'s rejection gates. The correction meant to save a pickup could cost one. | `VirtualInput.MoveCharacter`: write + `Physics.SyncTransforms()`. Falls back to the toggle for the session (and says so) if three consecutive corrections do not stick. |
 | 6 | **Corrections wrote identical values every frame** — quaternions (which can renormalise in the last bit), rigidbody velocity (wakes a sleeping body and resets its sleep timer). | A replay that was in sync was nudged out of it by the corrections themselves. | Pose, rigidbody and rig writes now happen only when the live value differs **bitwise**; the old 1 µm deadband is gone, so any difference is also corrected exactly. |
 | 7 | **Rigidbody identity ignored the scene**, so the level and `DontDestroyOnLoad` could produce the same path; one missing body aborted the whole replay. | Recording failed outright in some scene sets; an item picked up on replay but not in the recording ended the replay. | Identity is `scene:path#ordinal` (v4 identities still resolve); a missing body is counted in the report and the rest are still corrected. |
+| 8 | **The rig restore re-armed idle animation clips** (found 2026-10-04 in all 31 replay reports). The game reports every clip that has finished as `enabled` with weight 0 and time 0, and the restore wrote those values back, which restarts each clip from time 0. The crouch clips (`PlayerHukarSig` 2.45 → 1.15, `PlayerReserSig` 1.15 → 2.45, 0.25 s each, in `sharedassets1.assets`) animate the controller's `m_Height` and `CameraShakeAnim` directly. When both ran out, Unity wrote their 50/50 end pose: height **1.8** and the camera rig 0.6465 m × root scale 1.5478 = **1.0007 m** down. `playerLand` (0.40 s) did the same to the camera at frame 25. | From frame 16 of every replay the camera was a metre low (then ~16 cm from frame 25) and the capsule was 0.65 m short. The player sank ~15 mm after every position correction, which tripped the "corrections not sticking" fallback of #5. That fallback then rebuilt the controller every frame, setting `isFalling`. | `PlayerRigSnapshot.Restore` puts back only states with recorded weight. An idle state is left alone, unless it is shaping the replay's pose (weight > 0), in which case it is silenced. All writes happen only on a difference. Existing macros benefit without re-recording. |
 
 ## The sync check
 
@@ -54,24 +55,59 @@ they can never hide it from the report.
 | pickups | `Inventory.PickupItem` calls per frame | the same items on the same frames |
 | script order | whether the ray ran before or after the mod's update | engine-frame attribution is valid |
 
-## Missed item pickup recovery
+## Missed item pickups
 
-When a v5 macro records a pickup call but replay misses it, the replay waits
-until the game's interaction window closes, reports the natural mismatch, then
-equips the recorded item before issuing the next macro input. The final frame's
-pickup window is handled when playback finishes. A successful natural pickup
-is never repeated. The report lists forced, already held, failed, and skipped
-recoveries separately; a forced pickup does not erase the original divergence.
+Every pickup the recording made is made on the same frame of the replay. A
+pinned pickup ray could still lose one, for reasons the ray pin does not touch
+(2026-10-04: 15 replays, several missed items, the old steer never fired once):
 
-For a generic item, recovery validates its inventory definition, runs the
-game's drop logic through `PickRay.CheckItemDropping`, calls
-`Inventory.PickupItem`, and checks that the hand object became active. It
-removes a matching world item only when exactly one active source can be
-identified. The hand is still equipped when no world source remains. If
-several sources share the name, recovery stops rather than destroy an
-unidentified object. The special shotgun item named `b` is skipped because it
-requires an additional game method. Older macros without pickup traces cannot
-recover missed items; record a new macro to enable this feature.
+- **The click needs last frame's ring.** `PickRay.Update` turns the interact
+  edge into `buttonClicked` only while the pickup ring left by the *previous*
+  cast is showing (docs/ida-pickup-findings.md §1). A replay whose previous
+  cast missed the item has no ring, so the click is dropped however well this
+  cast is aimed.
+- **The mod's stand-in raycast is not the game's.** It uses all layers, so with
+  the replay's player a little off it often hits the player's own collider
+  (`'Main Camera'` in the reports) instead of the item the game's cast saw.
+- The item can sit elsewhere in the replay's world (it settled differently, or
+  its collider has not caught up with a drawer that moved it).
+
+So on a pickup ray cast in whose frame the recording picked something up and
+the replay has not yet, `InteractionPin.AssistPickup` sets up that one
+`PickRay.Update` call:
+
+1. **Item under the ray.** If the cast already hits what the recording hit,
+   nothing moves. Otherwise colliders are synced, and if the ray still misses,
+   the nearest active item of that name is moved to the first point along the
+   ray that is not part of the player, **with no distance limit**.
+2. **Gates.** `WindowJumping.IsJumping`, `PlayerStatus.IsJumpscared` and the
+   fall flags are given the values the recording's pickup must have had.
+3. **Click.** If the game would drop the click (no ring, or no interact edge),
+   `buttonClicked` is set directly. The item block consumes it like any other.
+
+The game's own pickup code then takes the item: prompt, sound, drop and
+special-item logic included. Everything goes back when the call ends, and a
+picked-up item is destroyed before the frame renders, so the move never shows.
+
+If the game *still* does not take it (its ray stops on something the mod
+cannot see, the frame is paused, the item is missing), `ForcePending` makes the
+pickup right after that same call, before anything else runs. It goes through
+the methods the game's pickup code calls, in its order:
+`buttonClicked = false`, `PickRay.CheckItemDropping`, `Inventory.PickupItem`,
+`PickRay.PickShotgun` for the shotgun, and `Destroy` of the world copy nearest
+the recorded ray. `Inventory.PickupItem` has exactly one caller in the game
+(interop `CallerCount = 1`: `PickRay.Update`), so every recorded pickup belongs
+to a pickup ray cast. The force waits for the recording's last pickup cast of
+that frame. An item with no world copy left is still put in hand. If it is
+already in hand with no copy left, it is not taken twice.
+
+The report keeps the misses visible. "ray hit (as cast)" is measured before
+the item moves. A forced pickup is still a difference in the `pickups` area
+(`recorded [Pliers], replay [], forced [Pliers]`). The corrections list counts
+`pickup items` (steers), `pickup clicks` and `forced pickups` (plus any that
+could not be forced, with the reason). An in-sync replay touches none of this.
+Turning off "pin pickup/door rays" turns all of it off. Older macros without
+pickup traces get none of it.
 
 At the end of every replay: one summary line in the log and on the panel
 (`sync: BIT-IDENTICAL over N frames`, or `sync: diverged at frame K (area: …)`),
